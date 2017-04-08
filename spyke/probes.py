@@ -58,6 +58,14 @@ class Probe(object):
         """Check probe attributes"""
         assert len(self.SiteLoc) == self.nchans <= MAXNCHANS
 
+    def get_chan0(self):
+        """Are channel IDs 0-based or 1-based for this probe?"""
+        chan0 = min(self.SiteLoc.keys())
+        assert chan0 in [0, 1]
+        return chan0
+
+    chan0 = property(get_chan0)
+
 
 class uMap54_1a(Probe):
     """uMap54_1a, 65 um spacing, 3 column hexagonal"""
@@ -517,48 +525,59 @@ class A1x32(Probe):
     def __init__(self):
         self.layout = 'A1x32'
         self.name = 'A1x32'
-        self.nchans = 32
+        self.probename = 'A1x32'
+        self.nchans = 35
+        self.nchan = 35
         self.ncols = 1
         sl = {}
-        sl[1] = 0, 775
-        sl[2] = 0, 725
-        sl[3] = 0, 675
-        sl[4] = 0, 625
-        sl[5] = 0, 575
-        sl[6] = 0, 525
-        sl[7] = 0, 475
-        sl[8] = 0, 425
-        sl[9] = 0, 375
-        sl[10] = 0, 325
-        sl[11] = 0, 275
-        sl[12] = 0, 225
-        sl[13] = 0, 175
-        sl[14] = 0, 125
-        sl[15] = 0, 75
-        sl[16] = 0, 25
-        sl[17] = 0, 0
-        sl[18] = 0, 50
-        sl[19] = 0, 100
-        sl[20] = 0, 150
-        sl[21] = 0, 200
-        sl[22] = 0, 250
-        sl[23] = 0, 300
-        sl[24] = 0, 350
-        sl[25] = 0, 400
-        sl[26] = 0, 450
-        sl[27] = 0, 500
-        sl[28] = 0, 550
-        sl[29] = 0, 600
-        sl[30] = 0, 650
-        sl[31] = 0, 700
-        sl[32] = 0, 750
+        sl[1] = 0, 0
+        sl[2] = 0, 50
+        sl[3] = 0, 100
+        sl[4] = 0, 150
+        sl[5] = 0, 200
+        sl[6] = 0, 250
+        sl[7] = 0, 300
+        sl[8] = 0, 350
+        sl[9] = 0, 400
+        sl[10] = 0, 450
+        sl[11] = 0, 500
+        sl[12] = 0, 550
+        sl[13] = 0, 600
+        sl[14] = 0, 650
+        sl[15] = 0, 700
+        sl[16] = 0, 750
+        sl[17] = 0, 800
+        sl[18] = 0, 850
+        sl[19] = 0, 900
+        sl[20] = 0, 950
+        sl[21] = 0, 1000
+        sl[22] = 0, 1050
+        sl[23] = 0, 1100
+        sl[24] = 0, 1150
+        sl[25] = 0, 1200
+        sl[26] = 0, 1250
+        sl[27] = 0, 1300
+        sl[28] = 0, 1350
+        sl[29] = 0, 1400
+        sl[30] = 0, 1450
+        sl[31] = 0, 1500
+        sl[32] = 0, 1550
+        sl[33] = 0, 1600
+        sl[34] = 0, 1650
+        sl[35] = 0, 1700
         self.SiteLoc = sl
         self.check()
-        
+
 
 TYPES = [uMap54_1a, uMap54_1b, uMap54_1c, uMap54_2a, uMap54_2b,
          pt16a_HS27, pt16b_HS27, single, IMEC30, A1x32]
 
+def getprobe(name):
+    for probetype in TYPES:
+        probe = probetype()
+        if probe.name == name:
+            return probe
+    raise ValueError("unknown probe name %r" % name)
 
 def findprobe(siteloc):
     """Return instantiation of first probe type whose layout matches siteloc"""
