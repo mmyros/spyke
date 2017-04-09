@@ -1711,7 +1711,7 @@ def filterord(data, sampfreq=1000, f0=300, f1=None, order=4, rp=None, rs=None,
     data = scipy.signal.lfilter(b, a, data)
     return data, b, a
 
-def WMLDR(data, wname="db4", maxlevel=5, mode='sym'):
+def WMLDR(data, wname="db4", maxlevel=6, mode='sym'):
     """Perform wavelet multi-level decomposition and reconstruction (WMLDR) on multichannel
     data. See Wiltschko2008. Default to Daubechies(4) wavelet. Modifies data in-place, at
     least for now. The effective cutoff frequency is:
@@ -1754,11 +1754,8 @@ def WMLDR(data, wname="db4", maxlevel=5, mode='sym'):
     per - periodization - is like periodic-padding but gives the smallest possible number of
     decomposition coefficients. IDWT must be performed with the same mode.
     """
-    import pywt,numpy
-    import statsmodels.api as sm
-    import cylowess
+    import pywt, statsmodels
 
-    
     data = np.atleast_2d(data)
     nt = data.shape[1]
     # reconstructed signals always seem to have an even number of points. If the number of
@@ -1768,17 +1765,15 @@ def WMLDR(data, wname="db4", maxlevel=5, mode='sym'):
     nchans = len(data)
     for chani in range(nchans):
         # loess
-        #fit=sm.nonparametric.lowess(data[chani],range(len(data[chani])))[:,1]
         
-        fit=cylowess.lowess(numpy.asarray(data[chani],dtype='float'),numpy.asarray(range(len(data[chani])),dtype='float'),frac=0.1,it=0,delta=0.01*len(data[chani]))[:,1]
-        data[chani]=data[chani]-fit
+        #data[chani]=statsmodels.nonparametric.smoothers_lowess.lowess(data[chani],range(len(data[chani))))
         # decompose the signal:
-        #cs = pywt.wavedec(data[chani], wname, mode=mode, level=maxlevel)
+        cs = pywt.wavedec(data[chani], wname, mode=mode, level=maxlevel)
         # destroy the appropriate approximation coefficients to get highpass data:
-        #cs[0] = None
+        cs[0] = None
         # reconstruct the signal:
-        #recsignal = pywt.waverec(cs, wname, mode=mode)
-        #ntrec = len(recsignal)
+        recsignal = pywt.waverec(cs, wname, mode=mode)
+        ntrec = len(recsignal)
         #data[chani] = recsignal[:ntrec-isodd]
     
     return data
