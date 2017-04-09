@@ -42,13 +42,24 @@ NULL = '\x00'
 MU = '\xb5' # greek mu symbol
 MICRO = 'u'
 
+DEFDATFILTMETH = 'BW' # default .dat filter method: None, 'BW', 'WMLDR'
 DEFNSXFILTMETH = 'BW' # default .nsx filter method: None, 'BW', 'WMLDR'
-BWF0 = 300 # low-frequency butterworth filter cutoff, Hz
-BWORDER = 4 # butterworth filter order
+BWHPF0 = 300 # butterworth high-pass filter low-frequency cutoff, Hz
+BWLPF1 = 300 # butterworth low-pass filter high-frequency cutoff, Hz
+BWHPORDER = 4 # butterworth high-pass filter order
+BWLPORDER = 4 # butterworth low-pass filter order
+# don't filter raw data, only decimate to get low pass? simple, but aliases
+LOWPASSFILTER = False
+
+DEFCAR = 'Median' # default common average reference method: None, 'Median', 'Mean';
+                  # 'Median' works best because it's least affected by spikes
 
 DEFHPRESAMPLEX = 2 # default highpass resampling factor for all stream types
-DEFHPSRFSHCORRECT = True
+DEFLPSAMPLFREQ = 1000 # default lowpass sampling rate for wide-band stream types, Hz
+DEFHPDATSHCORRECT = False ## TODO: this may not hold for open-ephys and Intan chips!
 DEFHPNSXSHCORRECT = False # no need for .nsx files, s+h delay is only 1 ns between chans
+DEFHPSRFSHCORRECT = True
+
 # Apparently KERNELSIZE == number of kernel zero crossings, but that seems to depend on
 # the phase of the kernel, some have one less, depending on the channel (when doing sample
 # and hold correction). Anyway, total number of points in the kernel is KERNELSIZE plus 1
@@ -56,18 +67,20 @@ DEFHPNSXSHCORRECT = False # no need for .nsx files, s+h delay is only 1 ns betwe
 # Should kernel size depend on the sampling rate? No, but perhaps the minimum kernel
 # size depends on the Nyquist rate.
 KERNELSIZE = 12
-assert KERNELSIZE % 2 == 0 # kernel size needs to be even, otherwise there's a slight but
-                           # undesireable time shift, perhaps because sampfreq always
-                           # needs to be an integer multiple of rawsampfreq
-NSXXSPOINTS = 200 # number of xs raw datapoints to include on either side of each NXSStream
-                  # slice call, separate for NSXStream because filtering requires more
-                  # excess
-NCHANSPERBOARD = 32 # TODO: stop hard coding this
+# kernel size needs to be even, otherwise there's a slight but undesireable time shift,
+# perhaps because sampfreq always needs to be an integer multiple of rawsampfreq:
+assert KERNELSIZE % 2 == 0
+# number of excess raw datapoints to include on either side of each wideband Stream
+# (such as a DATStream or NSXStream) during a slice call. Due to the lack of analog filtering,
+# a greater excess is needed than e.g. SurfStream because it's already analog filtered
+SRFNCHANSPERBOARD = 32 # TODO: would be better to not hard-code this
+XSWIDEBANDPOINTS = 200
 
 MAXLONGLONG = 2**63-1
 MAXNBYTESTOFILE = 2**31 # max array size safe to call .tofile() on in Numpy 1.5.0 on Windows
 
 MAXNSPIKEPLOTS = 200
+MAXNROWSLISTSELECTION = 10000
 
 CHANFIELDLEN = 256 # channel string field length at start of .resample file
 
@@ -132,6 +145,10 @@ class SimpleConverter(object):
         
     def uV2AD(self, uV, dtype=np.int16):
         return dtype(np.round(self.uV2ADx * uV))
+
+
+class DatConverter(SimpleConverter):
+    pass
 
 
 class NSXConverter(SimpleConverter):
@@ -370,7 +387,14 @@ class SpykeListView(QtGui.QListView):
 
     def selectionChanged(self, selected, deselected, prefix=None):
         """Plot neurons or spikes on list item selection"""
-        QtGui.QListView.selectionChanged(self, selected, deselected)
+        # For short lists, display the actual selection in the list, otherwise, if there are
+        # too many entries in the list, selection gets unbearably slow, especially as you
+        # select items further down the list. So for very long lists, don't actually show the
+        # selection. The selection events all still seem to work though, and for some reason
+        # sometimes the selections themselves are displayed, even when selected
+        # programmatically:
+        if self.nrows < MAXNROWSLISTSELECTION:
+            QtGui.QListView.selectionChanged(self, selected, deselected)
         panel = self.sortwin.panel
         addis = [ i.data().toInt()[0] for i in selected.indexes() ]
         remis = [ i.data().toInt()[0] for i in deselected.indexes() ]
@@ -1309,15 +1333,20 @@ def td2days(td):
     days = sec / 3600 / 24
     return days
 
-def issorted(x):
-    """Check if x is sorted"""
+def unsortedis(x):
+    """Return indices of entries in x that are out of order"""
+    x = np.asarray(x)
     try:
         if x.dtype.kind == 'u':
             # x is unsigned int array, risk of int underflow in np.diff
             x = np.int64(x)
     except AttributeError:
         pass # no dtype, not an array
-    return (np.diff(x) >= 0).all() # is difference between consecutive entries >= 0?
+    return np.where(np.diff(x) < 0)[0] # where is the diff between consecutive entries < 0?
+
+def issorted(x):
+    """Check if x is sorted"""
+    return len(unsortedis(x)) == 0
     # or, you could compare the array to an explicitly sorted version of itself,
     # and see if they're identical
 
@@ -1348,7 +1377,7 @@ def concatenate_destroy(arrs):
         a = np.empty(shape, dtype=dtype) # empty only allocates virtual memory
     except MemoryError:
         raise MemoryError("concatenate_destroy: not enough virtual memory to allocate "
-                          "destination array. Create/grow swap file?")
+                          "destination array. Create/grow your swap file?")
         
     rowi = 0
     for i in range(len(arrs)):
@@ -1665,12 +1694,19 @@ def filterord(data, sampfreq=1000, f0=300, f1=None, order=4, rp=None, rs=None,
 
     For 'ellip', need to also specify passband and stopband ripple with rp and rs.
     """
-    if f1 != None:
+    if f0 != None and f1 != None: # both are specified
+        assert btype in ['bandpass', 'bandstop']
         fn = np.array([f0, f1])
-    else:
+    elif f0 != None: # only f0 is specified
+        assert btype == 'highpass'
         fn = f0
-    wn = fn / (sampfreq / 2)
-    b, a = scipy.signal.iirfilter(order, wn, rp=None, rs=None, btype=btype, analog=0,
+    elif f1 != None: # only f1 is specified
+        assert btype == 'lowpass'
+        fn = f1
+    else: # neither f0 nor f1 are specified
+        raise ValueError('at least one of f0 or f1 have to be specified')
+    wn = fn / (sampfreq / 2) # wn can be either a scalar or a length 2 vector
+    b, a = scipy.signal.iirfilter(order, wn, rp=rp, rs=rs, btype=btype, analog=0,
                                   ftype=ftype, output='ba')
     data = scipy.signal.lfilter(b, a, data)
     return data, b, a

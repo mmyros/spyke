@@ -54,7 +54,7 @@ from core import toiter, tocontig, intround, MICRO, ClusterChange, SpykeToolWind
 from core import DJS, g, dist
 import stream
 from stream import SimpleStream, MultiStream
-import surf, nsx
+import dat, nsx, surf
 from sort import Sort, SortWindow, NSLISTWIDTH, MEANWAVEMAXSAMPLES, NPCSPERCHAN
 from plot import SpikePanel, ChartPanel, LFPPanel
 from detect import Detector, calc_SPIKEDTYPE, DEBUG
@@ -62,23 +62,30 @@ from extract import Extractor
 import probes
 
 # spike window temporal window (us)
-SPIKETW = {'.srf': (-400, 600), '.ns6': (-500, 1500), '.tsf': (-1000, 2000)}
+SPIKETW = {'.dat': (-500, 1500),
+           '.ns6': (-500, 1500),
+           '.srf': (-400, 600),
+           '.tsf': (-1000, 2000)}
 # chart window temporal window (us)
-CHARTTW = {'.srf': (-25000, 25000), '.ns6': (-25000, 25000), '.tsf': (-50000, 50000)}
+CHARTTW = {'.dat': (-25000, 25000),
+           '.ns6': (-25000, 25000),
+           '.srf': (-25000, 25000),
+           '.tsf': (-50000, 50000)}
 # LFP window temporal window (us)
 LFPTW = -500000, 500000
 
 # spatial channel layout:
 # UVPERUM affects vertical channel spacing and voltage gain (which is further multiplied by
 # each plot window's gain):
-UVPERUM = {'.srf': 2, '.ns6': 5, '.tsf': 20}
+UVPERUM = {'.dat': 5, '.ns6': 5, '.srf': 2, '.tsf': 20}
 # USPERUM affects horizontal channel spacing. Decreasing USPERUM increases horizontal overlap
 # between spike chans. For .srf data, 17 gives roughly no horizontal overlap for
 # self.tw[1] - self.tw[0] == 1000 us:
-USPERUM = {'.srf': 17, '.ns6': 17, '.tsf': 125} # untested for .ns6, need multicolumn data
+# untested for .dat and .ns6, need multicolumn data:
+USPERUM = {'.dat': 17, '.ns6': 17, '.srf': 17, '.tsf': 125}
 
-DYNAMICNOISEX = {'.srf': 6, '.ns6': 4.5, '.tsf': 3} # noise multiplier
-DT = {'.srf': 400, '.ns6': 600, '.tsf': 1500} # maximum time between spike peaks (us)
+DYNAMICNOISEX = {'.dat': 4.5, '.ns6': 4.5, '.srf': 6, '.tsf': 3} # noise multiplier
+DT = {'.dat': 600, '.ns6': 600, '.srf': 400, '.tsf': 1500} # max time between spike peaks (us)
 
 SLIDERTRES = 100 # slider temporal resoluion (us), slider is limited to 2**32 ticks
 
@@ -107,8 +114,9 @@ class SpykeWindow(QtGui.QMainWindow):
         QtGui.QMainWindow.__init__(self)
         self.ui = SpykeUi()
         self.ui.setupUi(self) # lay it out
-        self.groupMenuFiltmeth()
-        self.groupMenuSamplingRates()
+        self.groupMenuFiltering()
+        self.groupMenuCAR()
+        self.groupMenuSampling()
         self.addRecentFileActions()
         self.updateRecentFiles()
         
@@ -135,10 +143,11 @@ class SpykeWindow(QtGui.QMainWindow):
 
         self.dirtysids = set() # sids whose waveforms in .wave file are out of date
         
-        # disable most widgets until a data or .sort file is opened
+        # disable most widgets until a stream or a sort is opened:
         self.EnableStreamWidgets(False)
         self.EnableSortWidgets(False)
-        self.EnableFilteringMenu(False) # disable by default, few file types need filtering
+        self.EnableFilteringMenu(False) # disable by default, not all file types need filtering
+        self.EnableCARMenu(False) # disable until stream is open
         self.EnableSamplingMenu(False) # disable until stream is open
         
     def addRecentFileActions(self):
@@ -153,7 +162,27 @@ class SpykeWindow(QtGui.QMainWindow):
             self.ui.menuFile.insertAction(self.ui.actionSaveSort, action)
         self.ui.menuFile.insertSeparator(self.ui.actionSaveSort)
 
-    def groupMenuSamplingRates(self):
+    def groupMenuFiltering(self):
+        """Group filtering methods in filtering menu into a QActionGroup such that only
+        one is ever active at a time. This isn't possible to do from within
+        QtDesigner 4.7, so it's done here manually instead"""
+        ui = self.ui
+        filteringGroup = QtGui.QActionGroup(self)
+        filteringGroup.addAction(ui.actionFiltmethNone)
+        filteringGroup.addAction(ui.actionFiltmethBW)
+        filteringGroup.addAction(ui.actionFiltmethWMLDR)
+
+    def groupMenuCAR(self):
+        """Group common average referencing methods in CAR menu into a QActionGroup such
+        that only one is ever active at a time. This isn't possible to do from within
+        QtDesigner 4.7, so it's done here manually instead"""
+        ui = self.ui
+        CARGroup = QtGui.QActionGroup(self)
+        CARGroup.addAction(ui.actionCARNone)
+        CARGroup.addAction(ui.actionCARMedian)
+        CARGroup.addAction(ui.actionCARMean)
+
+    def groupMenuSampling(self):
         """Group sampling rates in sampling menu into a QActionGroup such that only
         one is ever active at a time. This isn't possible to do from within
         QtDesigner 4.7, so it's done here manually instead"""
@@ -168,16 +197,6 @@ class SpykeWindow(QtGui.QMainWindow):
         samplingGroup.addAction(ui.action80kHz)
         samplingGroup.addAction(ui.action100kHz)
 
-    def groupMenuFiltmeth(self):
-        """Group filtering methods in filtering menu into a QActionGroup such that only
-        one is ever active at a time. This isn't possible to do from within
-        QtDesigner 4.7, so it's done here manually instead"""
-        ui = self.ui
-        filteringGroup = QtGui.QActionGroup(self)
-        filteringGroup.addAction(ui.actionFiltmethNone)
-        filteringGroup.addAction(ui.actionFiltmethBW)
-        filteringGroup.addAction(ui.actionFiltmethWMLDR)
-
     @QtCore.pyqtSlot()
     def on_actionNew_triggered(self):
         self.DeleteSort() # don't create a new one until spikes exist
@@ -187,8 +206,8 @@ class SpykeWindow(QtGui.QMainWindow):
         getOpenFileName = QtGui.QFileDialog.getOpenFileName
         fname = getOpenFileName(self, caption="Open stream or sort",
                                 directory=self.streampath,
-                                filter="Surf, nsx, track, tsf, mat, event & sort files "
-                                       "(*.srf *.ns6 *.track *.tsf *.mat *.event*.zip "
+                                filter="dat, ns6, srf, track, tsf, mat, event & sort files "
+                                       "(*.dat *.ns6 *.srf *.track *.tsf *.mat *.event*.zip "
                                        "*.sort );;"
                                        "All files (*.*)")
         fname = str(fname)
@@ -436,10 +455,9 @@ class SpykeWindow(QtGui.QMainWindow):
 
     def exportDat(self):
         """Export raw ephys data to .dat file, in (ti, chani) order"""
-        ext = self.hpstream.get_ext()
-        if ext == '.ns6':
+        try:
             self.hpstream.f.export_dat()
-        else:
+        except AttributeError:
             raise NotImplementedError("Can't (yet) export raw ephys data from %s to .dat")
 
     @QtCore.pyqtSlot()
@@ -478,6 +496,8 @@ class SpykeWindow(QtGui.QMainWindow):
             v = self.update_0_8_to_0_9()
         if v == 0.9:
             v = self.update_0_9_to_1_0()
+        if v == 1.0:
+            v = self.update_1_0_to_1_1()
         print('now save me!')
             
     def update_0_3_to_0_4(self):
@@ -658,6 +678,20 @@ class SpykeWindow(QtGui.QMainWindow):
         print('done updating sort from version 0.9 to 1.0')
         return float(s.__version__)
 
+    def update_1_0_to_1_1(self):
+        """Update sort 1.0 to 1.1:
+            - add sort.car attrib, init to None
+        """
+        print('updating sort from version 1.0 to 1.1')
+        s = self.sort
+        try:
+            s.car
+        except AttributeError:
+            s.car = None
+        s.__version__ = '1.1' # update
+        print('done updating sort from version 1.0 to 1.1')
+        return float(s.__version__)
+
     @QtCore.pyqtSlot()
     def on_actionCloseSort_triggered(self):
         # TODO: add confirmation dialog if Sort not saved
@@ -794,6 +828,21 @@ class SpykeWindow(QtGui.QMainWindow):
         self.SetFiltmeth('WMLDR')
 
     @QtCore.pyqtSlot()
+    def on_actionCARNone_triggered(self):
+        """None CAR menu choice event"""
+        self.SetCAR(None)
+
+    @QtCore.pyqtSlot()
+    def on_actionCARMedian_triggered(self):
+        """Median CAR menu choice event"""
+        self.SetCAR('Median')
+
+    @QtCore.pyqtSlot()
+    def on_actionCARMean_triggered(self):
+        """Mean CAR menu choice event"""
+        self.SetCAR('Mean')
+
+    @QtCore.pyqtSlot()
     def on_action20kHz_triggered(self):
         """20kHz menu choice event"""
         self.SetSampfreq(20000)
@@ -850,9 +899,8 @@ class SpykeWindow(QtGui.QMainWindow):
 
     @QtCore.pyqtSlot()
     def on_actionAboutSpyke_triggered(self):
-        lf = open('../LICENSE', 'r')
-        LICENSE = lf.read()
-        lf.close()
+        with open('../LICENSE', 'r') as lf:
+            LICENSE = lf.read()
         system = """<p>Python %s, Qt %s, PyQt %s<br>
                     %s</p>""" % (platform.python_version(),
                                  QtCore.QT_VERSION_STR, QtCore.PYQT_VERSION_STR,
@@ -861,7 +909,7 @@ class SpykeWindow(QtGui.QMainWindow):
         <h2><a href=http://spyke.github.io>spyke</a> %s</h2>
         <p>A tool for neuronal waveform visualization and spike sorting</p>
 
-        <p>Copyright &copy; 2008-2016 <a href=http://mspacek.github.io>Martin Spacek</a>,
+        <p>Copyright &copy; 2008-2017 <a href=http://mspacek.github.io>Martin Spacek</a>,
                                                                        Reza Lotun<br>
            <a href=http://swindale.ecc.ubc.ca>Swindale</a> Lab,
            University of British Columbia, Vancouver, Canada<br>
@@ -906,8 +954,11 @@ class SpykeWindow(QtGui.QMainWindow):
         # create struct array of spikes and 3D array of spike waveform data:
         sort.spikes, sort.wavedata = sort.detector.detect(logpath=self.streampath)
         sort.update_usids()
-        sort.filtmeth = sort.stream.filtmeth # lock down filtmeth attrib
-        sort.sampfreq = sort.stream.sampfreq # lock down sampfreq and shcorrect attribs
+
+        # lock down filtmeth, car, sampfreq and shcorrect attribs:
+        sort.filtmeth = sort.stream.filtmeth
+        sort.car = sort.stream.car
+        sort.sampfreq = sort.stream.sampfreq
         sort.shcorrect = sort.stream.shcorrect
 
         self.ui.progressBar.setFormat("%d spikes" % sort.nspikes)
@@ -2160,7 +2211,7 @@ class SpykeWindow(QtGui.QMainWindow):
         head, tail = os.path.split(fname)
         assert head # make sure fname has a path to it
         base, ext = os.path.splitext(tail)
-        if ext in ['.srf', '.ns6', '.track', '.tsf', '.mat']:
+        if ext in ['.dat', '.ns6', '.srf', '.track', '.tsf', '.mat']:
             self.streampath = head
             self.OpenStreamFile(tail)
         elif ext == '.zip':
@@ -2175,28 +2226,28 @@ class SpykeWindow(QtGui.QMainWindow):
             self.OpenSortFile(tail)
         else:
             critical = QtGui.QMessageBox.critical
-            critical(self, "Error", "%s is not a .srf, .ns6, .track, .tsf, .mat, .event*.zip "
-                     "or .sort file" % fname)
+            critical(self, "Error", "%s is not a .dat, .ns6, .srf, .track, .tsf, .mat, "
+                                    ".event*.zip or .sort file" % fname)
 
     def OpenStreamFile(self, fname):
-        """Open a stream (.srf, .nsx, .track, or .tsf file) and update display accordingly.
-        fname is assumed to be relative to self.streampath"""
+        """Open a stream (.dat, .ns6, .srf, .track, or .tsf file) and update display
+        accordingly. fname is assumed to be relative to self.streampath"""
         if self.hpstream != None:
             self.CloseStream() # in case a stream is already open
         ext = os.path.splitext(fname)[1]
-        if ext == '.srf':
-            f = surf.File(fname, self.streampath)
-            f.parse() # TODO: parsing progress dialog
+        if ext == '.dat':
+            f = dat.File(fname, self.streampath) # parses immediately
             self.hpstream = f.hpstream # highpass record (spike) stream
             self.lpstream = f.lpstream # lowpassmultichan record (LFP) stream
         elif ext == '.ns6':
             f = nsx.File(fname, self.streampath) # parses immediately
             self.hpstream = f.hpstream # highpass record (spike) stream
             self.lpstream = f.lpstream # lowpassmultichan record (LFP) stream
-            try:
-                self.sort # sort exists?
-            except AttributeError: # no sort exists, enable Filtering menu
-                self.EnableFilteringMenu(True) # for now only .ns6 requires filtering
+        elif ext == '.srf':
+            f = surf.File(fname, self.streampath)
+            f.parse() # TODO: parsing progress dialog
+            self.hpstream = f.hpstream # highpass record (spike) stream
+            self.lpstream = f.lpstream # lowpassmultichan record (LFP) stream
         elif ext == '.track':
             fs = []
             with open(join(self.streampath, fname), 'r') as trackfile:
@@ -2205,11 +2256,13 @@ class SpykeWindow(QtGui.QMainWindow):
                         continue # skip it
                     fn = line.rstrip('\n')
                     fext = os.path.splitext(fn)[1]
-                    if fext == '.srf':
-                        f = surf.File(fn, self.streampath)
-                        f.parse()
+                    if fext == '.dat':
+                        f = dat.File(fn, self.streampath)
                     elif fext == '.ns6':
                         f = nsx.File(fn, self.streampath)
+                    elif fext == '.srf':
+                        f = surf.File(fn, self.streampath)
+                        f.parse()
                     fs.append(f) # build up list of open and parsed data file objects
             self.hpstream = MultiStream(fs, fname, kind='highpass')
             self.lpstream = MultiStream(fs, fname, kind='lowpass')
@@ -2236,7 +2289,12 @@ class SpykeWindow(QtGui.QMainWindow):
         self.updateRecentFiles(join(self.streampath, fname))
 
         self.ui.__dict__['actionFiltmeth%s' % self.hpstream.filtmeth ].setChecked(True)
-        self.ui.__dict__['action%dkHz' % (self.hpstream.sampfreq / 1000)].setChecked(True)
+        self.ui.__dict__['actionCAR%s' % self.hpstream.car ].setChecked(True)
+        try:
+            sampfreqkHz = self.hpstream.sampfreq / 1000
+            self.ui.__dict__['action%dkHz' % sampfreqkHz].setChecked(True)
+        except KeyError:
+            print('WARNING: %d kHz is not a sampling menu option' % sampfreqkHz)
         self.ui.actionSampleAndHoldCorrect.setChecked(self.hpstream.shcorrect)
 
         self.spiketw = SPIKETW[ext] # spike window temporal window (us)
@@ -2599,8 +2657,9 @@ class SpykeWindow(QtGui.QMainWindow):
 
         sort.update_usids() # required for self.on_plotButton_clicked()
 
-        # lock down filtmeth, sampfreq and shcorrect attribs:
+        # lock down filtmeth, car, sampfreq and shcorrect attribs:
         #sort.filtmeth = sort.stream.filtmeth
+        #sort.car = sort.stream.car
         #sort.sampfreq = sort.stream.sampfreq
         #sort.shcorrect = sort.stream.shcorrect
 
@@ -2687,8 +2746,9 @@ class SpykeWindow(QtGui.QMainWindow):
 
         sort.update_usids() # required for self.on_plotButton_clicked()
 
-        # lock down filtmeth, sampfreq and shcorrect attribs:
+        # lock down filtmeth, car, sampfreq and shcorrect attribs:
         sort.filtmeth = sort.stream.filtmeth
+        sort.car = sort.stream.car
         sort.sampfreq = sort.stream.sampfreq
         sort.shcorrect = sort.stream.shcorrect
 
@@ -2890,7 +2950,9 @@ class SpykeWindow(QtGui.QMainWindow):
         self.update_spiketw(sort.tw)
         # restore filtering method:
         self.SetFiltmeth(sort.filtmeth)
-        # restore sampling variables:
+        # restore CAR method:
+        self.SetCAR(sort.car)
+        # restore sampfreq and shcorrect:
         self.SetSampfreq(sort.sampfreq)
         self.SetSHCorrect(sort.shcorrect)
         self.ui.progressBar.setFormat("%d spikes" % sort.nspikes)
@@ -3351,6 +3413,13 @@ class SpykeWindow(QtGui.QMainWindow):
             self.plot()
         self.ui.__dict__['actionFiltmeth%s' % filtmeth].setChecked(True)
 
+    def SetCAR(self, car):
+        """Set common average reference method"""
+        if self.hpstream != None:
+            self.hpstream.car = car
+            self.plot()
+        self.ui.__dict__['actionCAR%s' % car].setChecked(True)
+
     def SetSampfreq(self, sampfreq):
         """Set highpass stream sampling frequency, update widgets"""
         if self.hpstream != None:
@@ -3371,7 +3440,10 @@ class SpykeWindow(QtGui.QMainWindow):
         try:
             self.sort
         except AttributeError:
-            self.EnableSamplingMenu(enable) # change state only if sort doesn't already exist
+            # change these menu states only if sort doesn't already exist:
+            self.EnableFilteringMenu(enable)
+            self.EnableCARMenu(enable)
+            self.EnableSamplingMenu(enable)
         self.EnableConvertMenu(enable)
         self.ui.filePosStartButton.setEnabled(enable)
         self.ui.filePosLineEdit.setEnabled(enable)
@@ -3382,6 +3454,7 @@ class SpykeWindow(QtGui.QMainWindow):
     def EnableSortWidgets(self, enable):
         """Enable/disable all widgets that require a sort"""
         self.EnableFilteringMenu(not enable)
+        self.EnableCARMenu(not enable)
         self.EnableSamplingMenu(not enable)
         self.ui.actionRasters.setEnabled(enable)
         self.ShowRasters(enable)
@@ -3392,6 +3465,12 @@ class SpykeWindow(QtGui.QMainWindow):
         """Enable/disable all items in Filtering menu, while still allowing
         the menu to be opened and its contents viewed"""
         for action in self.ui.menuFiltering.actions():
+            action.setEnabled(enable)
+
+    def EnableCARMenu(self, enable):
+        """Enable/disable all items in CAR menu, while still allowing
+        the menu to be opened and its contents viewed"""
+        for action in self.ui.menuCAR.actions():
             action.setEnabled(enable)
 
     def EnableSamplingMenu(self, enable):

@@ -14,8 +14,10 @@ import numpy as np
 import core
 from core import (WaveForm, EmptyClass, intround, intfloor, intceil, lrstrip, MU,
                   hamming, filterord, WMLDR, td2fusec)
-from core import (DEFHPRESAMPLEX, DEFHPSRFSHCORRECT, DEFHPNSXSHCORRECT, DEFNSXFILTMETH,
-                  BWF0, BWORDER, NCHANSPERBOARD, KERNELSIZE, NSXXSPOINTS)
+from core import (DEFHPRESAMPLEX, DEFLPSAMPLFREQ, DEFHPSRFSHCORRECT,
+                  DEFHPDATSHCORRECT, DEFDATFILTMETH, DEFHPNSXSHCORRECT, DEFNSXFILTMETH, DEFCAR,
+                  BWHPF0, BWLPF1, BWHPORDER, BWLPORDER, LOWPASSFILTER,
+                  SRFNCHANSPERBOARD, KERNELSIZE, XSWIDEBANDPOINTS)
 import probes
 
 
@@ -60,6 +62,13 @@ class Stream(object):
         return os.path.splitext(self.fnames[0])[-1] # take extension of first fname
 
     ext = property(get_ext)
+
+    def get_srcfnameroot(self):
+        """Get root of filename of source data"""
+        srcfnameroot = lrstrip(self.fname, '../', self.ext)
+        return srcfnameroot
+
+    srcfnameroot = property(get_srcfnameroot)
 
     def get_nchans(self):
         return len(self.chans)
@@ -184,7 +193,8 @@ class Stream(object):
         #print('convolve loop took %.3f sec' % (time.time()-tconvolve))
         #print('convolve calls took %.3f sec total' % (tconvolvesum))
         #tundoscaling = time.time()
-        data >>= 16 # undo kernel scaling, shift 16 bits right in place, same as //= 2**16
+        # undo kernel scaling, shift 16 bits right in place, same as //= 2**16, leave as int32
+        data >>= 16
         #print('undo kernel scaling took %.3f sec total' % (time.time()-tundoscaling))
         return data, ts
 
@@ -215,7 +225,7 @@ class Stream(object):
         else:
             assert self.shcorrect == True
             # ordinal position of each ADchan in the hold queue of its ADC board:
-            i = ADchans % NCHANSPERBOARD
+            i = ADchans % SRFNCHANSPERBOARD
             ## TODO: stop hard-coding 1 masterclockfreq tick delay per ordinal position
             # per channel delays, us, usually 1 us/chan:
             dis = 1000000 / self.masterclockfreq * i
@@ -240,42 +250,36 @@ class Stream(object):
         return kernels
 
 
-class NSXStream(Stream):
-    def __init__(self, f, kind='highpass', filtmeth=None, sampfreq=None, shcorrect=None):
+class DATStream(Stream):
+    """Stream interface for .dat files"""
+    def __init__(self, f, kind='highpass', filtmeth=None, car=None, sampfreq=None,
+                 shcorrect=None):
         self.f = f
         self.kind = kind
-        if kind == 'highpass':
-            pass
-        elif kind == 'lowpass':
-            pass
-        else: raise ValueError('Unknown stream kind %r' % kind)
+        if kind not in ['highpass', 'lowpass']:
+            raise ValueError('Unknown stream kind %r' % kind)
 
-        self.filtmeth = filtmeth or DEFNSXFILTMETH
+        self.filtmeth = filtmeth or DEFDATFILTMETH
+        self.car = car or DEFCAR
 
-        self.converter = core.NSXConverter(f.fileheader.AD2uVx)
+        self.converter = core.DatConverter(f.fileheader.AD2uVx)
 
-        probename = f.fileheader.comment # maybe the comment specifies the probe type?
-        if probename == '':
-            probename = probes.DEFNSXPROBETYPE # A1x32
-        ## TODO: could also use findprobe(chanpos) to get probetype, but unfortunately
-        ## chanpos isn't available in .nsx files
-        probetype = eval('probes.' + probename) # yucky. TODO: switch to a dict with keywords?
-        self.probe = probetype()
+        self.probe = f.fileheader.probe
 
         self.rawsampfreq = f.fileheader.sampfreq # Hz
         self.rawtres = 1 / self.rawsampfreq * 1e6 # float us
 
         if kind == 'highpass':
             self.sampfreq = sampfreq or DEFHPRESAMPLEX * self.rawsampfreq
-            self.shcorrect = shcorrect or DEFHPNSXSHCORRECT
+            self.shcorrect = shcorrect or DEFHPDATSHCORRECT
         else: # kind == 'lowpass'
-            self.sampfreq = sampfreq or self.rawsampfreq # don't resample by default
-            self.shcorrect = shcorrect or False # don't s+h correct by default
-
-        # no need for shcorrect for .nsx because the Blackrock Cerebrus NSP system has a
-        # 1 GHz multiplexer for every bank of 32 channels, according to Kian Torab
-        # <support@blackrock.com>
-        assert self.shcorrect == False
+            self.sampfreq = sampfreq or DEFLPSAMPLFREQ
+            # make sure that after low-pass filtering the raw data, we can easily decimate
+            # the result to get the desired lowpass sampfreq:
+            assert self.rawsampfreq % self.sampfreq == 0
+            self.shcorrect = shcorrect or False
+            # for simplicity, don't allow s+h correction of lowpass data, no reason to anyway:
+            assert self.shcorrect == False
 
         self.chans = f.fileheader.chans
 
@@ -290,18 +294,25 @@ class NSXStream(Stream):
         specified chans"""
         if chans is None:
             chans = self.chans
+        kind = self.kind
         if not set(chans).issubset(self.chans):
             raise ValueError("requested chans %r are not a subset of available enabled "
-                             "chans %r in %s stream" % (chans, self.chans, self.kind))
-        nchans = len(chans)
-        chanis = self.f.fileheader.chans.searchsorted(chans)
-
+                             "chans %r in %s stream" % (chans, self.chans, kind))
+        # NOTE: because CAR needs to average across as many channels as possible, work on
+        # the full self.chans (which are the chans enabled in the stream) until the very end,
+        # and only then slice out what is potentially a subset of self.chans using `chans`
         rawtres = self.rawtres
-        resample = self.sampfreq != self.rawsampfreq or self.shcorrect == True
+        if kind == 'highpass':
+            resample = self.sampfreq != self.rawsampfreq or self.shcorrect == True
+            decimate = False
+        else: # kind == 'lowpass'
+            resample = False # which also means no s+h correction allowed
+            decimate = True
+
         # excess data in us at either end, to eliminate filtering and interpolation
         # edge effects:
-        #print('NSXXSPOINTS: %d' % NSXXSPOINTS)
-        xs = NSXXSPOINTS * rawtres
+        #print('XSWIDEBANDPOINTS: %d' % XSWIDEBANDPOINTS)
+        xs = XSWIDEBANDPOINTS * rawtres
         #print('xs: %d, rawtres: %g' % (xs, rawtres))
 
         # stream limits, in us and in sample indices, wrt t=0 and sample=0:
@@ -321,13 +332,17 @@ class NSXStream(Stream):
         tsxs = np.linspace(t0xs, t0xs+(ntxs-1)*rawtres, ntxs)
         #print('ntxs: %d' % ntxs)
 
-        # init data as int32 so we have bitwidth to rescale and zero, then convert to int16
-        dataxs = np.zeros((nchans, ntxs), dtype=np.int32) # any gaps will have zeros
+        # init dataxs; unlike for .srf files, int32 dataxs array isn't necessary for
+        # int16 .dat or .nsx files, since there's no need to zero or rescale
+        dataxs = np.zeros((self.nchans, ntxs), dtype=np.int16) # any gaps will have zeros
 
+        '''
+        Load up data+excess. The same raw data is used for high and low pass streams,
+        the only difference being the subsequent filtering. It would be convenient to
+        immediately subsample to get lowpass, but that would result in aliasing. We can
+        only subsample after filtering.
+        '''
         #tload = time.time()
-        # load up data+excess, same data for high and low pass, difference will only be in the
-        # filtering. It would be convenient to immediately subsample to get lowpass, but that's
-        # not a valid thing to do: you can only subsample after filtering.
         # source indices:
         st0i = max(t0xsi - t0i, 0)
         st1i = min(t1xsi - t0i, nt)
@@ -335,55 +350,137 @@ class NSXStream(Stream):
         # destination indices:
         dt0i = max(t0i - t0xsi, 0)
         dt1i = min(t1i - t0xsi, ntxs)
-        dataxs[:, dt0i:dt1i] = self.f.data[chanis, st0i:st1i]
+        dataxs[:, dt0i:dt1i] = self.f.data[:, st0i:st1i]
         #print('data load took %.3f sec' % (time.time()-tload))
 
         #print('filtmeth: %s' % self.filtmeth)
         if self.filtmeth == None:
             pass
         elif self.filtmeth == 'BW':
-            # high-pass filter using butterworth filter:
-            dataxs, b, a = filterord(dataxs, sampfreq=self.rawsampfreq, f0=BWF0, f1=None,
-                                     order=BWORDER, rp=None, rs=None,
-                                     btype='highpass', ftype='butter')
+            # high or low pass filter using Butterworth filter:
+            if kind == 'highpass':
+                btype, order, f0, f1 = kind, BWHPORDER, BWHPF0, None
+                dataxs, b, a = filterord(dataxs, sampfreq=self.rawsampfreq, f0=f0, f1=f1,
+                                         order=order, rp=None, rs=None,
+                                         btype=btype, ftype='butter') # float64
+            else: # kind == 'lowpass'
+                if LOWPASSFILTER:
+                    btype, order, f0, f1 = kind, BWLPORDER, None, BWLPF1
+                    dataxs, b, a = filterord(dataxs, sampfreq=self.rawsampfreq, f0=f0, f1=f1,
+                                             order=order, rp=None, rs=None,
+                                             btype=btype, ftype='butter') # float64
         elif self.filtmeth == 'WMLDR':
-            # high-pass filter using wavelet multi-level decomposition and reconstruction:
+            # high pass filter using wavelet multi-level decomposition and reconstruction,
+            # can't directly use this for low pass filtering, but it might be possible to
+            # approximate low pass filtering with WMLDR by subtracting the high pass data
+            # from the raw data...:
+            assert kind == 'highpass' # for now
             ## TODO: fix weird slow wobbling of amplitude as a function of exactly what
             ## the WMLDR filtering time range happens to be. Setting a much bigger xs
             ## helps, but only until you move xs amount of time away from the start of
-            ## the recording
+            ## the recording. Perhaps WMLDR doesn't quite remove all the low freqs the way
+            ## Butterworth filtering does
             dataxs = WMLDR(dataxs)
         else:
             raise ValueError('unknown filter method %s' % self.filtmeth)
 
+        # do common average reference (CAR): remove correlated noise by subtracting the
+        # average across all channels (Ludwig et al, 2009, Pachitariu et al, 2016):
+        if self.car and kind == 'highpass': # for now, only apply CAR to highpass stream
+            if self.car == 'Median':
+                avg = np.median
+            elif self.car == 'Mean':
+                avg = np.mean
+            else:
+                raise ValueError('Unknown CAR method %r' % self.car)
+            # at each timepoint, find average across all chans:
+            car = avg(dataxs, axis=0) # float64
+            # at each timepoint, subtract average across all chans, don't do in place
+            # because dataxs might be int16 or float64, depending on filtering:
+            dataxs = dataxs - car
+
         # do any resampling if necessary:
         if resample:
             #tresample = time.time()
-            dataxs, tsxs = self.resample(dataxs, tsxs, chans)
+            dataxs, tsxs = self.resample(dataxs, tsxs, self.chans)
             #print('resample took %.3f sec' % (time.time()-tresample))
+        if decimate:
+            decimatex = intround(self.rawsampfreq / self.sampfreq)
+            dataxs, tsxs = dataxs[:, ::decimatex], tsxs[::decimatex]
 
         #nresampletxs = len(tsxs)
         #print('ntxs, nresampletxs: %d, %d' % (ntxs, nresampletxs))
         #assert ntxs == len(tsxs)
 
-        # now trim down to just the requested time range, work on us integer values to prevent
-        # floating point round-off error (when tres is non-integer us) that can occasionally
+        # now trim down to just the requested time range and chans:
+        # for trimming time range, work on us integer values to prevent floating point
+        # round-off error (when tres is non-integer us) that can occasionally
         # cause searchsorted to produce off-by-one indices:
         lo, hi = intround(tsxs).searchsorted(intround([start, stop]))
-        data = dataxs[:, lo:hi]
+        chanis = self.f.fileheader.chans.searchsorted(chans)
+        data = dataxs[chanis, lo:hi]
         ts = tsxs[lo:hi]
-        #print('NSX:', start, stop, self.tres, data.shape)
+        #print('slice:', start, stop, self.tres, data.shape)
 
         # should be safe to convert back down to int16 now:
         data = np.int16(data)
         return WaveForm(data=data, ts=ts, chans=chans)
 
 
+class NSXStream(DATStream):
+    """Stream interface for .nsx files"""
+    def __init__(self, f, kind='highpass', filtmeth=None, car=None, sampfreq=None,
+                 shcorrect=None):
+        self.f = f
+        self.kind = kind
+        if kind not in ['highpass', 'lowpass']:
+            raise ValueError('Unknown stream kind %r' % kind)
+
+        self.filtmeth = filtmeth or DEFNSXFILTMETH
+        self.car = car or DEFCAR
+
+        self.converter = core.NSXConverter(f.fileheader.AD2uVx)
+
+        # maybe the comment specifies the probe type?
+        probename = f.fileheader.comment.replace(' ', '_')
+        if probename == '':
+            probename = probes.DEFNSXPROBETYPE # A1x32
+            print('WARNING: assuming probe %r was used in this recording' % probename)
+        self.probe = probes.getprobe(probename)
+
+        self.rawsampfreq = f.fileheader.sampfreq # Hz
+        self.rawtres = 1 / self.rawsampfreq * 1e6 # float us
+
+        if kind == 'highpass':
+            self.sampfreq = sampfreq or DEFHPRESAMPLEX * self.rawsampfreq
+            self.shcorrect = shcorrect or DEFHPNSXSHCORRECT
+        else: # kind == 'lowpass'
+            self.sampfreq = sampfreq or DEFLPSAMPLFREQ
+            # make sure that after low-pass filtering the raw data, we can easily decimate
+            # the result to get the desired lowpass sampfreq:
+            assert self.rawsampfreq % self.sampfreq == 0
+            self.shcorrect = shcorrect or False
+            # for simplicity, don't allow s+h correction of lowpass data, no reason to anyway:
+            assert self.shcorrect == False
+
+        # no need for shcorrect for .nsx because the Blackrock Cerebrus NSP system has a
+        # 1 GHz multiplexer for every bank of 32 channels, according to Kian Torab
+        # <support@blackrock.com>
+        assert self.shcorrect == False
+
+        self.chans = f.fileheader.chans
+
+        self.contiguous = f.contiguous
+
+        self.t0, self.t1 = f.t0, f.t1
+        self.tranges = np.asarray([[self.t0, self.t1]])
+
+
 class SurfStream(Stream):
-    """Data stream object - provides stream interface to .srf files.
-    Maps from timestamps to record index of stream data to retrieve the
-    approriate range of waveform data from disk"""
-    def __init__(self, f, kind='highpass', sampfreq=None, shcorrect=None):
+    """Stream interface for .srf files. Maps from timestamps to record index
+    of stream data to retrieve the approriate range of waveform data from disk"""
+    def __init__(self, f, kind='highpass', filtmeth=None, car=None, sampfreq=None,
+                 shcorrect=None):
         """Takes a sorted temporal (not necessarily evenly-spaced, due to pauses in recording)
         sequence of ContinuousRecords: either HighPassRecords or LowPassMultiChanRecords.
         sampfreq arg is useful for interpolation. Assumes that all HighPassRecords belong
@@ -396,7 +493,8 @@ class SurfStream(Stream):
             self.records = f.lowpassmultichanrecords
         else: raise ValueError('Unknown stream kind %r' % kind)
 
-        self.filtmeth = None
+        self.filtmeth = filtmeth
+        self.car = car or DEFCAR
 
         # assume same layout for all records of type "kind"
         self.layout = self.f.layoutrecords[self.records['Probe'][0]]
@@ -423,8 +521,7 @@ class SurfStream(Stream):
             self.shcorrect = shcorrect or False # don't s+h correct by default
         probename = self.layout.electrode_name
         probename = probename.replace(MU, 'u') # replace any 'micro' symbols with 'u'
-        probetype = eval('probes.' + probename) # yucky. TODO: switch to a dict with keywords?
-        self.probe = probetype() # instantiate it
+        self.probe = probes.getprobe(probename)
 
         rts = self.records['TimeStamp'] # array of record timestamps
         NumSamples = np.unique(self.records['NumSamples'])
@@ -589,11 +686,21 @@ class SurfStream(Stream):
         # AD to about 0.02
         dataxs <<= 4 # data is still int32 at this point
 
+        ## TODO: add highpass filtering, although it probably won't make much difference
+        if self.filtmeth:
+            raise NotImplementedError("SurfStream doesn't support filtering yet")
+
         # do any resampling if necessary:
         if resample:
             #tresample = time.time()
             dataxs, tsxs = self.resample(dataxs, tsxs, chans)
             #print('resample took %.3f sec' % (time.time()-tresample))
+
+        ## TODO: add CAR here, after S+H correction (in self.resample) rather than before it,
+        ## because CAR assumes simultaneous timepoints across chans. Also need to slice out
+        ## chans only at the very end, as in DATStream
+        if self.car:
+            raise NotImplementedError("SurfStream doesn't support CAR yet")
 
         # now trim down to just the requested time range, work on us integer values to prevent
         # floating point round-off error (when tres is non-integer us) that can occasionally
@@ -611,11 +718,12 @@ class SurfStream(Stream):
 class SimpleStream(Stream):
     """Simple Stream loaded fully in advance"""
     def __init__(self, fname, wavedata, siteloc, rawsampfreq, masterclockfreq,
-                 intgain, extgain, sampfreq=None, shcorrect=None, bitshift=4,
-                 tsfversion=None):
+                 intgain, extgain, filtmeth=None, car=None, sampfreq=None,
+                 shcorrect=None, bitshift=4, tsfversion=None):
         self._fname = fname
         self.wavedata = wavedata
-        self.filtmeth = None
+        self.filtmeth = filtmeth
+        self.car = car or DEFCAR
         nchans, nt = wavedata.shape
         self.chans = np.arange(nchans) # this sets self.nchans
         self.nt = nt
@@ -728,11 +836,21 @@ class SimpleStream(Stream):
         if self.bitshift:
             dataxs <<= self.bitshift # data is still int32 at this point
 
+        ## TODO: add highpass filtering
+        if self.filtmeth:
+            raise NotImplementedError("SimpleStream doesn't support filtering yet")
+
         # do any resampling if necessary:
         if resample:
             #tresample = time.time()
             dataxs, tsxs = self.resample(dataxs, tsxs, chans)
             #print('resample took %.3f sec' % (time.time()-tresample))
+
+        ## TODO: add CAR here, after S+H correction (in self.resample) rather than before it,
+        ## because CAR assumes simultaneous timepoints across chans. Also need to slice out
+        ## chans only at the very end, as in DATStream
+        if self.car:
+            raise NotImplementedError("SimpleStream doesn't support CAR yet")
 
         # now trim down to just the requested time range, work on us integer values to prevent
         # floating point round-off error (when tres is non-integer us) that can occasionally
@@ -752,7 +870,7 @@ class MultiStream(object):
     used to simultaneously cluster all spikes from many (or all) recordings from the same
     track. Designed to have as similar an interface as possible to a normal Stream. fs
     needs to be a list of open and parsed data file objects, in temporal order"""
-    def __init__(self, fs, trackfname, kind='highpass', filtmeth=None,
+    def __init__(self, fs, trackfname, kind='highpass', filtmeth=None, car=None,
                  sampfreq=None, shcorrect=None):
         # to prevent pickling problems, don't bind fs
         self.fname = trackfname
@@ -820,23 +938,34 @@ class MultiStream(object):
             raise RuntimeError("some files have different probe types")
         self.probe = probe # they're identical
 
-        # set sampfreq, shcorrect and filtmeth for all streams
+        # set filtmeth, car, sampfreq, and shcorrect for all streams:
         streamtype = type(streams[0])
-        if streamtype == SurfStream:
+        if streamtype == DATStream:
             if kind == 'highpass':
+                self.filtmeth = filtmeth or DEFDATFILTMETH
+                self.car = car or DEFCAR
+                self.sampfreq = sampfreq or self.rawsampfreq * DEFHPRESAMPLEX
+                self.shcorrect = shcorrect or DEFHPDATSHCORRECT
+            else: # kind == 'lowpass'
+                return None
+        elif streamtype == NSXStream:
+            if kind == 'highpass':
+                self.filtmeth = filtmeth or DEFNSXFILTMETH
+                self.car = car or DEFCAR
+                self.sampfreq = sampfreq or self.rawsampfreq * DEFHPRESAMPLEX
+                self.shcorrect = shcorrect or DEFHPNSXSHCORRECT
+            else: # kind == 'lowpass'
+                return None
+        elif streamtype == SurfStream:
+            if kind == 'highpass':
+                self.filtmeth = filtmeth
+                self.car = car or DEFCAR
                 self.sampfreq = sampfreq or self.rawsampfreq * DEFHPRESAMPLEX
                 self.shcorrect = shcorrect or DEFHPSRFSHCORRECT
             else: # kind == 'lowpass'
+                self.filtmeth = filtmeth
                 self.sampfreq = sampfreq or self.rawsampfreq # don't resample by default
                 self.shcorrect = shcorrect or False # don't s+h correct by default
-            self.filtmeth = None
-        elif streamtype == NSXStream:
-            if kind == 'highpass':
-                self.sampfreq = sampfreq or self.rawsampfreq * DEFHPRESAMPLEX
-                self.shcorrect = shcorrect or DEFHPNSXSHCORRECT
-                self.filtmeth = filtmeth or DEFNSXFILTMETH
-            else: # kind == 'lowpass'
-                return None
 
     def is_open(self):
         return np.all([stream.is_open() for stream in self.streams])
@@ -878,6 +1007,24 @@ class MultiStream(object):
         return len(self.chans)
 
     nchans = property(get_nchans)
+
+    def get_filtmeth(self):
+        return self.streams[0].filtmeth # they're identical
+
+    def set_filtmeth(self, filtmeth):
+        for stream in self.streams:
+            stream.filtmeth = filtmeth
+
+    filtmeth = property(get_filtmeth, set_filtmeth)
+
+    def get_car(self):
+        return self.streams[0].car # they're identical
+
+    def set_car(self, car):
+        for stream in self.streams:
+            stream.car = car
+
+    car = property(get_car, set_car)
 
     def get_sampfreq(self):
         return self.streams[0].sampfreq # they're identical
@@ -931,13 +1078,15 @@ class MultiStream(object):
             raise ValueError("requested chans %r are not a subset of available enabled "
                              "chans %r in %s stream" % (chans, self.chans, self.kind))
         nchans = len(chans)
-        start, stop = max(start, self.t0), min(stop, self.t1) # stay in bounds
+        tres = self.tres
+        start = intfloor(start / tres) * tres # round down to nearest mult of tres
+        stop = intceil(stop / tres) * tres # round up to nearest mult of tres
+        start, stop = max(start, self.t0), min(stop, self.t1) # stay within stream limits
         streamis = []
         ## TODO: this could probably be more efficient by not iterating over all streams:
         for streami, trange in enumerate(self.streamtranges):
             if (trange[0] <= start < trange[1]) or (trange[0] <= stop < trange[1]):
                 streamis.append(streami)
-        tres = self.tres
         nt = intround((stop - start) / tres)
         # safer to use linspace than arange in case of float tres, deals with endpoints
         # better and gives slightly more accurate output float timestamps:
@@ -957,8 +1106,6 @@ class MultiStream(object):
             # destination time indices:
             dt0i = int((abst0 + relt0 - start) // tres) # absolute index, trunc to int
             dt1i = dt0i + sdata.shape[1]
-            ## TODO: indexing bug again when zooming in quite far, doesn't happen for
-            ## single stream?
             data[:, dt0i:dt1i] = sdata
             #print('dt0i, dt1i', dt0i, dt1i)
             #print('MLT:', start, stop, tres, sdata.shape, data.shape)

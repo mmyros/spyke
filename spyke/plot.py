@@ -651,8 +651,8 @@ class PlotPanel(FigureCanvas):
 
     def get_xy_um(self):
         """Pull xy tuples in um out of self.pos, store in (2 x nchans) array,
-        in self.chans order. In chart and lfp frames, this is different from siteloc,
-        since these frames have only a single column"""
+        in self.chans order. In chart and lfp panels, this is different from siteloc,
+        since these panels have only a single column"""
         xy_um = np.asarray([ (self.us2um(self.pos[chan][0]), self.uv2um(self.pos[chan][1]))
                                   for chan in self.chans ]).T # x is row0, y is row1
         return xy_um
@@ -1162,11 +1162,14 @@ class LFPPanel(ChartPanel):
     stream = property(get_stream)
 
     def do_layout(self):
+        """This is only necessary for SurfStream, which has a .layout attrib, and only to
+        prevent plotting vref lines for chans that don't exist in the LFP"""
         ChartPanel.do_layout(self)
-        # need to specifically get a list of keys, not an iterator,
-        # since self.pos dict changes size during iteration
-        # don't remember why this was sometimes necessary to do:
-        for chan in self.pos.keys():
+        # Need to get a list of keys, not an iterator, since self.pos dict can change size
+        # during iteration:
+        try: self.stream.layout
+        except AttributeError: return
+        for chan in list(self.pos):
             if chan not in self.stream.layout.chans:
                 del self.pos[chan] # remove siteloc chans not in lowpassmultichan record
                 try:
@@ -1175,9 +1178,14 @@ class LFPPanel(ChartPanel):
                     pass
 
     def set_chans(self, chans):
-        """Reset chans for this LFPPanel, triggering colour update.
+        """This is only necessary for SurfStream, which has a .layout attrib.
+        Reset chans for this LFPPanel, triggering colour update.
         Take intersection of lpstream.layout.chans and chans_enabled,
         conserving order in lpstream.layout.chans"""
+        ## TODO: LFP chan become incorrectly coloured for non-surf files when channels are
+        ## disabled, probably has to do with this:
+        try: self.stream.layout
+        except AttributeError: return
         chans = [ chan for chan in self.stream.layout.chans if chan in chans ]
         ChartPanel.set_chans(self, chans)
     '''
