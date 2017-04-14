@@ -2740,7 +2740,9 @@ class SpykeWindow(QtGui.QMainWindow):
         det.nspikes = nspikes
 
         # init wavedata:
+        #from scipy import sparse;   sparse.csr_matrix((nspikes,det.maxnchansperspike,det.maxnt),dtype='int16')
         sort.wavedata = np.zeros((nspikes, det.maxnchansperspike, det.maxnt), dtype=np.int16)
+        #sort.wavedata=np.zeros((1,det.maxnchansperspike,det.maxnt),dtype=np.int16)
         # "re"load spike wavedata based on imported events:
         sort.reloadSpikes(spikes['id'])
 
@@ -3039,7 +3041,7 @@ class SpykeWindow(QtGui.QMainWindow):
             del sort.wavedata
             #gc.collect() # ensure memory is freed up to prepare for new wavedata, necessary?
         except AttributeError: pass
-        wavedata = np.load(f)
+        wavedata = np.load(f,mmap_mode='c')
         print('done opening wave file, took %.3f sec' % (time.time()-t0))
         print('wave file was %d bytes long' % f.tell())
         f.close()
