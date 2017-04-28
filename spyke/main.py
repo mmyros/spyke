@@ -8,6 +8,7 @@ __authors__ = ['Martin Spacek', 'Reza Lotun']
 
 import numpy as np
 import pyximport
+import tqdm
 pyximport.install(build_in_temp=False, inplace=True)
 from gac import gac # .pyx file
 import util # .pyx file
@@ -2787,7 +2788,7 @@ class SpykeWindow(QtGui.QMainWindow):
         f = sort.extractor.f
         nreject = 0 # number spikes rejected during spatial localization
         print('running spatial localization on all spikes')
-        for s, wd in zip(sort.spikes, sort.wavedata):
+        for s, wd in tqdm.tqdm(zip(sort.spikes, sort.wavedata)):
             # Get Vpp at each inclchan's tis, use as spatial weights:
             # see core.rowtake() or util.rowtake_cy() for indexing explanation:
             nid = s['nid']
@@ -2837,8 +2838,9 @@ class SpykeWindow(QtGui.QMainWindow):
             ylockchaniis, = np.where(np.abs(y - y0) <= lockr) # convert bool arr to int
             # test Euclid distance from x0, y0 for each ylockchani:
             lockchaniis = ylockchaniis.copy()
+            
             for ylockchanii in ylockchaniis:
-                if dist((x[ylockchanii], y[ylockchanii]), (x0, y0)) > lockr:
+                if dist((x[ylockchanii], y[ylockchanii]), (x0, y0)) > lockr and len(lockchaniis)>ylockchanii:
                     lockchaniis = np.delete(lockchaniis, ylockchanii) # dist is too great
             lockchans = chans[lockchaniis]
             nlockchans = len(lockchans)
@@ -3041,7 +3043,7 @@ class SpykeWindow(QtGui.QMainWindow):
             del sort.wavedata
             #gc.collect() # ensure memory is freed up to prepare for new wavedata, necessary?
         except AttributeError: pass
-        wavedata = np.load(f,mmap_mode='c')
+        wavedata = np.load(f)
         print('done opening wave file, took %.3f sec' % (time.time()-t0))
         print('wave file was %d bytes long' % f.tell())
         f.close()
@@ -3073,7 +3075,7 @@ class SpykeWindow(QtGui.QMainWindow):
             s.spikefname = os.path.splitext(fname)[0] + '.spike'
         self.SaveSpikeFile(s.spikefname) # always (re)save .spike when saving .sort
         print('saving sort file %r' % fname)
-        t0 = time.time()
+        qt0 = time.time()
         self.save_clustering_selections()
         self.save_window_states()
         s.fname = fname # bind it now that it's about to be saved

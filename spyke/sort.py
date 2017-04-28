@@ -1202,7 +1202,8 @@ class Sort(object):
 
         # process each group:
         sidi = 0 # init sid index across all groups, used as status counter
-        for group in groups:
+        import tqdm
+        for group in tqdm.tqdm(groups):
             assert len(group) > 0 # otherwise something went wrong above
             t0 = spikes[group[0]]['t0']
             t1 = spikes[group[-1]]['t1']

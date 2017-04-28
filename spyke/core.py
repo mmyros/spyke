@@ -1711,7 +1711,9 @@ def filterord(data, sampfreq=1000, f0=300, f1=None, order=4, rp=None, rs=None,
     data = scipy.signal.lfilter(b, a, data)
     return data, b, a
 
-def lowess(data,frac=0.1,deltafrac=0.01):
+def WMLDR(data, wname="db4", maxlevel=5, mode='sym'):
+    #def lowess(data,frac=0.1,deltafrac=0.01,it=0):
+    frac=0.05;deltafrac=0.01;it=0
     ''' Local regression (Lowess) filter for spike extraction
     dependency: pip install cylowess
     '''
@@ -1725,11 +1727,11 @@ def lowess(data,frac=0.1,deltafrac=0.01):
         # lowess using vanilla statsmodels
         #fit=sm.nonparametric.lowess(data[chani],range(len(data[chani])))[:,1]
         # cython implementation
-        fit=cylowess.lowess(numpy.asarray(data[chani],dtype='float'),numpy.asarray(range(len(data[chani])),dtype='float'),frac=frac,it=0,delta=deltafrac*len(data[chani]))[:,1]
+        fit=cylowess.lowess(np.asarray(data[chani],dtype='float'),np.asarray(range(len(data[chani])),dtype='float'),frac=frac,it=it,delta=deltafrac*len(data[chani]))[:,1]
         data[chani]=data[chani]-fit
+    return data
 
-
-def WMLDR(data, wname="db4", maxlevel=5, mode='sym'):
+def WMLDR_real(data, wname="db4", maxlevel=5, mode='sym'):
     """Perform wavelet multi-level decomposition and reconstruction (WMLDR) on multichannel
     data. See Wiltschko2008. Default to Daubechies(4) wavelet. Modifies data in-place, at
     least for now. The effective cutoff frequency is:
