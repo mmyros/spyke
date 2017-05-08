@@ -1727,6 +1727,7 @@ def WMLDR(data, wname="db4", maxlevel=5, mode='sym'):
         # lowess using vanilla statsmodels
         #fit=sm.nonparametric.lowess(data[chani],range(len(data[chani])))[:,1]
         # cython implementation
+        # good params: delta=4.61
         fit=cylowess.lowess(np.asarray(data[chani],dtype='float'),np.asarray(range(len(data[chani])),dtype='float'),frac=frac,it=it,delta=deltafrac*len(data[chani]))[:,1]
         data[chani]=data[chani]-fit
     return data

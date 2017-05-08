@@ -1065,7 +1065,8 @@ class SpykeWindow(QtGui.QMainWindow):
             subsidss.append(sids)
             msgs.append('%d selected sids' % len(sids))
         nids = self.subcluster(sids, subsidss, msgs, dims)
-        print('clustering took %.3f sec' % (time.time()-t0))
+        try: print('clustering took %.3f sec' % (time.time()-t0))
+        except: pass
         self.apply_clustering(oldclusters, sids, nids, verb='GAC')
 
     def subcluster(self, sids, subsidss, msgs, dims):
@@ -1093,7 +1094,6 @@ class SpykeWindow(QtGui.QMainWindow):
         if len(sids) == 0: # nothing selected
             sids = spikes['id'] # all spikes (sorted)
             oldclusters = s.clusters.values() # all clusters
-        t0 = time.time()
         chans = spikes[sids]['chans']
         chans = tocontig(chans) # string view won't work without contiguity
         # each row becomes a string:
@@ -1109,7 +1109,6 @@ class SpykeWindow(QtGui.QMainWindow):
             nids[(chans == chancombo).all(axis=1)] = comboi + 1
         if (nids == 0).any():
             raise RuntimeError("there shouldn't be any unclustered points from chancombosplit")
-        print('chancombosplit took %.3f sec' % (time.time()-t0))
         self.apply_clustering(oldclusters, sids, nids, verb='chancombo split')
 
     def maxchansplit(self):
@@ -1121,7 +1120,6 @@ class SpykeWindow(QtGui.QMainWindow):
         if len(sids) == 0: # nothing selected
             sids = spikes['id'] # all spikes (sorted)
             oldclusters = s.clusters.values() # all clusters
-        t0 = time.time()
         maxchans = spikes[sids]['chan']
         umaxchans = np.unique(maxchans)
         if len(umaxchans) == 1:
@@ -1133,7 +1131,6 @@ class SpykeWindow(QtGui.QMainWindow):
             nids[maxchans == maxchan] = maxchani + 1
         if (nids == 0).any():
             raise RuntimeError("there shouldn't be any unclustered points from maxchansplit")
-        print('maxchansplit took %.3f sec' % (time.time()-t0))
         self.apply_clustering(oldclusters, sids, nids, verb='maxchan split')
 
     def densitysplit(self):
@@ -1227,14 +1224,12 @@ class SpykeWindow(QtGui.QMainWindow):
         self.update_sort_from_cluster_pane()
         npoints, ndims = data.shape
         print('clustering %d points in %d-D space' % (npoints, ndims))
-        t0 = time.time()
         nids = gac(data, sigma=s.sigma, rmergex=s.rmergex, rneighx=s.rneighx,
                    alpha=s.alpha, maxgrad=s.maxgrad,
                    maxnnomerges=1000, minpoints=s.minpoints)
         # nids from gac() are 0-based, but we want our single unit nids to be 1-based,
         # to leave room for junk cluster at 0 and multiunit clusters at nids < 0. So add 1:
         nids += 1
-        print('GAC took %.3f sec' % (time.time()-t0))
         return nids
     
     def get_selchans(self, sids):
@@ -1708,9 +1703,7 @@ class SpykeWindow(QtGui.QMainWindow):
         trange = max(1000, trange) # enforce min trange, in us
         trange = np.array([-trange, trange]) # convert to a +/- array, in us
         
-        t0 = time.time()
         dts = util.xcorr(xspikets, yspikets, trange=trange) # in us
-        print('xcorr calc took %.3f sec' % (time.time()-t0))
         if autocorr:
             dts = dts[dts != 0] # remove 0s for autocorr
         #print(dts)
@@ -2112,7 +2105,6 @@ class SpykeWindow(QtGui.QMainWindow):
         # restore the old clusters
         oldclusters = []
         dims = self.GetClusterPlotDims()
-        t0 = time.time()
         # NOTE: oldunids are not necessarily sorted
         for nid, pos, normpos in zip(oldunids, poss, normposs):
             nsids = sids[oldnids == nid] # sids belonging to this nid
@@ -2129,7 +2121,6 @@ class SpykeWindow(QtGui.QMainWindow):
         # now do some final updates
         self.UpdateClustersGUI()
         self.ColourPoints(oldclusters)
-        #print('applying clusters to plot took %.3f sec' % (time.time()-t0))
         # select newly recreated oldclusters
         self.SelectClusters(oldclusters)
         # restore bystander selections
@@ -2920,12 +2911,10 @@ class SpykeWindow(QtGui.QMainWindow):
         with the same name, restore the (closed) stream"""
         self.DeleteSort() # delete any existing Sort
         print('opening sort file %r' % fname)
-        t0 = time.time()
         f = open(join(self.sortpath, fname), 'rb')
         unpickler = cPickle.Unpickler(f)
         unpickler.find_global = core.unpickler_find_global_0_7_to_0_8
         sort = unpickler.load()
-        print('done opening sort file, took %.3f sec' % (time.time()-t0))
         print('sort file was %d bytes long' % f.tell())
         f.close()
         self.sort = sort
@@ -3014,10 +3003,8 @@ class SpykeWindow(QtGui.QMainWindow):
     def OpenSpikeFile(self, fname):
         sort = self.sort
         print('loading spike file %r' % fname)
-        t0 = time.time()
         f = open(join(self.sortpath, fname), 'rb')
         spikes = np.load(f)
-        print('done opening spike file, took %.3f sec' % (time.time()-t0))
         print('spike file was %d bytes long' % f.tell())
         f.close()
         sort.spikes = spikes
@@ -3034,7 +3021,6 @@ class SpykeWindow(QtGui.QMainWindow):
         """Open a .wave file and return wavedata array"""
         sort = self.sort
         print('opening wave file %r' % fname)
-        t0 = time.time()
         try: f = open(join(self.sortpath, fname), 'rb')
         except IOError:
             print("can't find file %r" % fname)
@@ -3044,7 +3030,6 @@ class SpykeWindow(QtGui.QMainWindow):
             #gc.collect() # ensure memory is freed up to prepare for new wavedata, necessary?
         except AttributeError: pass
         wavedata = np.load(f)
-        print('done opening wave file, took %.3f sec' % (time.time()-t0))
         print('wave file was %d bytes long' % f.tell())
         f.close()
         if len(wavedata) != sort.nspikes:
@@ -3075,14 +3060,12 @@ class SpykeWindow(QtGui.QMainWindow):
             s.spikefname = os.path.splitext(fname)[0] + '.spike'
         self.SaveSpikeFile(s.spikefname) # always (re)save .spike when saving .sort
         print('saving sort file %r' % fname)
-        qt0 = time.time()
         self.save_clustering_selections()
         self.save_window_states()
         s.fname = fname # bind it now that it's about to be saved
         f = open(join(self.sortpath, fname), 'wb')
         cPickle.dump(s, f, protocol=-1) # pickle with most efficient protocol
         f.close()
-        print('done saving sort file, took %.3f sec' % (time.time()-t0))
         self.updateTitle()
         self.updateRecentFiles(join(self.sortpath, fname))
 
@@ -3131,11 +3114,9 @@ class SpykeWindow(QtGui.QMainWindow):
             self.SaveWaveFile(s.wavefname, sids=self.dirtysids)
             self.dirtysids.clear() # no longer dirty
         print('saving spike file %r' % fname)
-        t0 = time.time()
         f = open(join(self.sortpath, fname), 'wb')
         np.save(f, s.spikes)
         f.close()
-        print('done saving spike file, took %.3f sec' % (time.time()-t0))
         s.spikefname = fname # used to indicate that the spikes have been saved
 
     def SaveWaveFile(self, fname, sids=None):
@@ -3147,7 +3128,6 @@ class SpykeWindow(QtGui.QMainWindow):
         if not os.path.splitext(fname)[1]: # if it doesn't have an extension
             fname = fname + '.wave'
         print('saving wave file %r' % fname)
-        t0 = time.time()
         if sids != None and len(sids) >= NDIRTYSIDSTHRESH:
             sids = None # resave all of them for speed
         if sids is None: # write the whole file
@@ -3158,7 +3138,6 @@ class SpykeWindow(QtGui.QMainWindow):
         else: # write only sids
             print('updating %d spikes in wave file %r' % (len(sids), fname))
             core.updatenpyfilerows(join(self.sortpath, fname), sids, s.wavedata)
-        print('done saving wave file, took %.3f sec' % (time.time()-t0))
         s.wavefname = fname
 
     def DeleteSort(self):
