@@ -72,7 +72,7 @@ class uMap54_1a(Probe):
     def __init__(self):
         self.layout = '1a'
         self.name = 'uMap54_1a'
-        self.nchans = 54
+        self.nchans = 67
         self.ncols = 3
         sl = {}
         sl[0] = -56, 1170
@@ -125,10 +125,23 @@ class uMap54_1a(Probe):
         sl[47] = 56, 715
         sl[48] = 56, 845
         sl[49] = 56, 910
-        sl[50] = 56, 975
-        sl[51] = 56, 1105
-        sl[52] = 56, 1170
-        sl[53] = 56, 1040
+        sl[50] = 76, 975
+        sl[51] = 76, 1105
+        sl[52] = 76, 1170
+        sl[53] = 76, 1040
+        sl[54] = 76, 260
+        sl[55] = 76, 130
+        sl[56] = 76, 65
+        sl[57] = 76, 195
+        sl[58] = 76, 325
+        sl[59] = 76, 455
+        sl[60] = 76, 585
+        sl[61] = 76, 715
+        sl[62] = 76, 845
+        sl[63] = 76, 910
+        sl[64] = 86, 975
+        sl[65] = 86, 845
+        sl[66] = 86, 910
         self.SiteLoc = sl
         self.check()
 
