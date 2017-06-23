@@ -282,7 +282,6 @@ class DATStream(Stream):
             assert self.shcorrect == False
 
         self.chans = f.fileheader.chans
-
         self.contiguous = f.contiguous
 
         self.t0, self.t1 = f.t0, f.t1
@@ -334,6 +333,7 @@ class DATStream(Stream):
 
         # init dataxs; unlike for .srf files, int32 dataxs array isn't necessary for
         # int16 .dat or .nsx files, since there's no need to zero or rescale
+
         dataxs = np.zeros((self.nchans, ntxs), dtype=np.int16) # any gaps will have zeros
 
         '''
