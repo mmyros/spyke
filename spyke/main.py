@@ -2,16 +2,47 @@
 
 from __future__ import division
 from __future__ import print_function
-from __init__ import __version__
+
+import sys
+if sys.version_info.major > 2:
+    print
+    print("WARNING!!!: You're running spyke in Python 3.x., currently unsupported.\n"
+          "            spyke only saves and loads .sort files correctly in Python 2.7.x,\n"
+          "            don't attempt to do so in Python 3.x!")
+    input('Hit ENTER to continue...')
 
 __authors__ = ['Martin Spacek', 'Reza Lotun']
 
+# set working directory to path of this module instead of path of script that launched python,
+# otherwise Qt4 has problems finding the spyke.ui file:
+from . import __path__
+import os
+os.chdir(__path__[0])
+
+import sys
+import platform
+import time
+import datetime
+import gc
+try:
+    import cPickle as pickle
+except ImportError:
+    import pickle
+import random
+from copy import copy
+from struct import unpack
+from collections import OrderedDict as odict
+
 import numpy as np
+<<<<<<< HEAD
 import pyximport
 import tqdm
 pyximport.install(build_in_temp=False, inplace=True)
 from gac import gac # .pyx file
 import util # .pyx file
+=======
+import scipy.stats
+>>>>>>> upstream/master
 
 # instantiate an IPython embedded shell which shows up in the terminal on demand
 # and on every exception:
@@ -33,34 +64,23 @@ from matplotlib.backends.backend_qt4agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qt4agg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
 
-import scipy.stats
-import os
-from os.path import join
-import sys
-import platform
-import time
-import datetime
-import gc
-import cPickle
-import random
-from copy import copy
-from struct import unpack
+import pyximport
+pyximport.install(build_in_temp=False, inplace=True)
+from . import util # .pyx file
+from .gac import gac # .pyx file
 
-# seems unnecessary: automatically add spyke to path
-#spykepath = os.path.split(os.getcwd())[0] # parent dir of cwd
-#sys.path.insert(0, spykepath)
-
-import core
-from core import toiter, tocontig, intround, MICRO, ClusterChange, SpykeToolWindow
-from core import DJS, g, dist
-import stream
-from stream import SimpleStream, MultiStream
-import dat, nsx, surf
-from sort import Sort, SortWindow, NSLISTWIDTH, MEANWAVEMAXSAMPLES, NPCSPERCHAN
-from plot import SpikePanel, ChartPanel, LFPPanel
-from detect import Detector, calc_SPIKEDTYPE, DEBUG
-from extract import Extractor
-import probes
+from . import core
+from .core import (toiter, tocontig, intround, intceil, printflush, lstrip, matlabize,
+                   g, dist, iterable, ClusterChange, SpykeToolWindow, DJS,
+                   qvar2list, qvar2str)
+from . import dat, nsx, surf, stream, probes
+from .stream import SimpleStream, MultiStream
+from .sort import Sort, SortWindow, NSLISTWIDTH, MEANWAVEMAXSAMPLES, NPCSPERCHAN
+from .plot import SpikePanel, ChartPanel, LFPPanel
+from .detect import Detector, calc_SPIKEDTYPE, DEBUG
+from .extract import Extractor
+from .cluster import Cluster, ClusterWindow
+from .__version__ import __version__
 
 # spike window temporal window (us)
 SPIKETW = {'.dat': (-500, 1500),
@@ -75,6 +95,9 @@ CHARTTW = {'.dat': (-25000, 25000),
 # LFP window temporal window (us)
 LFPTW = -500000, 500000
 
+# shift KiloSort spike times by this much for better positioning in sort window:
+KILOSORTSHIFTCORRECT = -100 # us
+
 # spatial channel layout:
 # UVPERUM affects vertical channel spacing and voltage gain (which is further multiplied by
 # each plot window's gain):
@@ -82,13 +105,13 @@ UVPERUM = {'.dat': 5, '.ns6': 5, '.srf': 2, '.tsf': 20}
 # USPERUM affects horizontal channel spacing. Decreasing USPERUM increases horizontal overlap
 # between spike chans. For .srf data, 17 gives roughly no horizontal overlap for
 # self.tw[1] - self.tw[0] == 1000 us:
-# untested for .dat and .ns6, need multicolumn data:
-USPERUM = {'.dat': 17, '.ns6': 17, '.srf': 17, '.tsf': 125}
+# However, this also depends on the horizontal spacing of the probe sites, so really
+# this should be set according to probe type, not file type, or it should be scaled in
+# terms of fraction of the horizontal span of the probe site layout:
+USPERUM = {'.dat': 50, '.ns6': 50, '.srf': 17, '.tsf': 125}
 
 DYNAMICNOISEX = {'.dat': 4.5, '.ns6': 4.5, '.srf': 6, '.tsf': 3} # noise multiplier
 DT = {'.dat': 600, '.ns6': 600, '.srf': 400, '.tsf': 1500} # max time between spike peaks (us)
-
-SLIDERTRES = 100 # slider temporal resoluion (us), slider is limited to 2**32 ticks
 
 SCREENWIDTH = 1920 # TODO: this should be found programmatically
 #SCREENHEIGHT = 1080 # TODO: this should be found programmatically
@@ -101,7 +124,7 @@ LFPWINDOWSIZE = 250+2*BORDER, SPIKEWINDOWHEIGHT
 #SHELLSIZE = CHARTWINDOWSIZE[0], CHARTWINDOWSIZE[1]/2
 CLUSTERWINDOWHEIGHT = 700
 
-MAXRECENTFILES = 10 # anything > 10 will probably mess up keyboard accelerators
+MAXRECENTFILES = 20 # anything > 10 will mess up keyboard accelerators, but who cares
 WINDOWUPDATEORDER = ['Spike', 'LFP', 'Chart'] # chart goes last cuz it's slowest
 
 # if updating at least this many selected spikes in .wave file, update them all
@@ -140,8 +163,6 @@ class SpykeWindow(QtGui.QMainWindow):
         self.cchanges = core.Stack() # cluster change stack, for undo/redo
         self.cci = -1 # pointer to cluster change for the next undo (add 1 for next redo)
 
-        self.SetClusteringDims(['c0', 'c1', 'c2'])
-
         self.dirtysids = set() # sids whose waveforms in .wave file are out of date
         
         # disable most widgets until a stream or a sort is opened:
@@ -171,6 +192,7 @@ class SpykeWindow(QtGui.QMainWindow):
         filteringGroup = QtGui.QActionGroup(self)
         filteringGroup.addAction(ui.actionFiltmethNone)
         filteringGroup.addAction(ui.actionFiltmethBW)
+        filteringGroup.addAction(ui.actionFiltmethBWNC)
         filteringGroup.addAction(ui.actionFiltmethWMLDR)
 
     def groupMenuCAR(self):
@@ -197,20 +219,59 @@ class SpykeWindow(QtGui.QMainWindow):
         samplingGroup.addAction(ui.action60kHz)
         samplingGroup.addAction(ui.action80kHz)
         samplingGroup.addAction(ui.action100kHz)
+        samplingGroup.addAction(ui.action120kHz)
 
     @QtCore.pyqtSlot()
-    def on_actionNew_triggered(self):
+    def on_actionNewSort_triggered(self):
         self.DeleteSort() # don't create a new one until spikes exist
+
+    @QtCore.pyqtSlot()
+    def on_actionNewTrack_triggered(self):
+        self.CreateNewTrack()
+
+    def CreateNewTrack(self):
+        """Create a new .track file"""
+        exts = ['.ns6', '.dat', '.srf']
+        caption = "Create .track file from %s files" % ' '.join(exts)
+        starexts = [ '*%s' % ext for ext in exts ]
+        filter = ('%s files ' % ', '.join(exts) +
+                  '(%s)' % ' '.join(starexts) + ';;All files (*.*)')
+        trackfname = getSaveFileName(self, caption=caption,
+                                     directory=self.streampath,
+                                     filter=filter)
+        trackfname = str(trackfname)
+        if not trackfname:
+            return
+        if not trackfname.endswith('.track'):
+            trackfname += '.track'
+        path = os.path.split(trackfname)[0]
+        ls = os.listdir(path)
+        fnames = {}
+        for ext in exts:
+            fnames = [ fname for fname in os.listdir(path) if fname.endswith(ext) ]
+            if len(fnames) > 0:
+                break
+        if len(fnames) == 0:
+            print("Couldn't find any .ns6, .dat, or .srf files in %r" % path)
+            return
+        fnames = sorted(fnames)
+        trackstr = '\n'.join(fnames)
+        with open(trackfname, 'w') as trackf:
+            trackf.write(trackstr)
+            trackf.write('\n') # end the file with a newline
+        print('Wrote track file %r:' % trackfname)
+        print(trackstr)
+        self.OpenFile(trackfname)
 
     @QtCore.pyqtSlot()
     def on_actionOpen_triggered(self):
         getOpenFileName = QtGui.QFileDialog.getOpenFileName
+        filter = (".dat, .ns6, .srf, .track, .tsf, .mat, .event & .sort files "
+                  "(*.dat *.ns6 *.srf *.track *.tsf *.mat *.event*.zip *.sort );;"
+                  "All files (*.*)")
         fname = getOpenFileName(self, caption="Open stream or sort",
                                 directory=self.streampath,
-                                filter="dat, ns6, srf, track, tsf, mat, event & sort files "
-                                       "(*.dat *.ns6 *.srf *.track *.tsf *.mat *.event*.zip "
-                                       "*.sort );;"
-                                       "All files (*.*)")
+                                filter=filter)
         fname = str(fname)
         if fname:
             self.OpenFile(fname)
@@ -231,13 +292,15 @@ class SpykeWindow(QtGui.QMainWindow):
         """Save sort to new .sort file"""
         defaultfname = os.path.join(self.sortpath, self.sort.fname)
         if self.sort.fname == '': # sort hasn't been previously saved
-            # generate default fname with hpstream.fname and datetime
+            # generate default fname with hpstream.fname:
             fname = self.hpstream.fname.replace(' ', '_')
-            dt = str(datetime.datetime.now()) # get an export timestamp
-            dt = dt.split('.')[0] # ditch the us
-            dt = dt.replace(' ', '_')
-            dt = dt.replace(':', '.')
-            defaultfname += fname + '_' + dt + '.sort'
+            # and datetime:
+            #dt = str(datetime.datetime.now()) # get a sort creation timestamp
+            #dt = dt.split('.')[0] # ditch the us
+            #dt = dt.replace(' ', '_')
+            #dt = dt.replace(':', '.')
+            #defaultfname += fname + '_' + dt + '.sort'
+            defaultfname += fname + '.sort'
         fname = getSaveFileName(self, caption="Save sort As",
                                 directory=defaultfname,
                                 filter="Sort files (*.sort);;"
@@ -257,8 +320,39 @@ class SpykeWindow(QtGui.QMainWindow):
             self.SaveSortFile(tail)
 
     @QtCore.pyqtSlot()
+    def on_actionSaveTrackChans_triggered(self):
+        self.SaveTrackChans()
+
+    def SaveTrackChans(self):
+        """Overwrite existing .track file, potentially saving a new set of enabled chans"""
+        stream = self.hpstream
+        if not stream.is_multi():
+            print("Stream is not a MultiStream, can't save a .track file")
+            return
+        trackfname = os.path.join(self.streampath, stream.fname)
+        if not os.path.isfile(trackfname):
+            raise RuntimeError('somehow the current MultiStream has no existing .track file')
+        trackstr = ''
+        allchans = np.sort(stream.streams[0].f.fileheader.chans)
+        if len(stream.chans) != len(allchans):
+            # some chans are disabled, write them as a comment in .track file
+            trackstr += '# enabledchans = %r\n' % list(stream.chans)
+        else:
+            assert (stream.chans == allchans).all()
+        trackstr += '\n'.join(stream.fnames)
+        with open(trackfname, 'w') as trackf:
+            trackf.write(trackstr)
+            trackf.write('\n') # end the file with a newline
+        print('Wrote track file %r:' % trackfname)
+        print(trackstr)
+
+    @QtCore.pyqtSlot()
     def on_actionSaveParse_triggered(self):
-        self.hpstream.pickle()
+        if self.hpstream.ext == '.srf':
+            self.hpstream.pickle()
+        else:
+            print('Only .srf streams have complicated parsings that can be '
+                  'saved to a .parse file')
 
     @QtCore.pyqtSlot()
     def on_actionExportPtcsFiles_triggered(self):
@@ -267,24 +361,6 @@ class SpykeWindow(QtGui.QMainWindow):
         path = str(path)
         if path:
             self.sort.exportptcsfiles(path, self.sortpath)
-            # don't update path
-
-    @QtCore.pyqtSlot()
-    def on_actionExportGdfFiles_triggered(self):
-        path = getExistingDirectory(self, caption="Export .gdf file(s) to",
-                                    directory=self.sortpath)
-        path = str(path)
-        if path:
-            self.sort.exportgdffiles(path)
-            # don't update path
-
-    @QtCore.pyqtSlot()
-    def on_actionExportSpkFiles_triggered(self):
-        path = getExistingDirectory(self, caption="Export .spk files to",
-                                    directory=self.sortpath)
-        path = str(path)
-        if path:
-            self.sort.exportspikes(path)
             # don't update path
 
     @QtCore.pyqtSlot()
@@ -403,63 +479,278 @@ class SpykeWindow(QtGui.QMainWindow):
             self.sort.exportspikewaves(sids, selchans, tis, fname, format)
 
     @QtCore.pyqtSlot()
+    def on_actionExportHighPassDatFiles_triggered(self):
+        self.export_hpstream()
+
+    def export_hpstream(self, cat=False, export_msg='high-pass', export_ext='.filt.dat'):
+        """Export high-pass stream to user-designated path, using current preprocessing
+        settings (filtering, CAR, and resampling) and channel selection, to export_ext file(s)
+        with associated export_ext.json file describing the preprocessing that was done. This
+        can also be used to export raw data if the hpstream settings for filtering, CAR and
+        resampling are set appropriately. Use export_msg and export_ext to communicate this.
+        cat controls whether to concatenate all the exported data into a single
+        .dat file"""
+        if not self.hpstream:
+            print('First open a stream!')
+            return
+        if self.hpstream.is_multi(): # self.hpstream is a MultiStream
+            hpstreams = self.hpstream.streams
+            defaultpath = hpstreams[0].f.path # get path of first stream
+            if cat: # export entire MultiStream to one file:
+                hpstreams = [self.hpstream]
+        else: # self.hpstream is a single Stream
+            hpstreams = [self.hpstream]
+            defaultpath = hpstreams[0].f.path
+            assert cat == False # nonsensical for a single Stream
+        caption = "Export %s data to %s files" % (export_msg, export_ext)
+        path = str(getExistingDirectory(self, caption=caption, directory=defaultpath))
+        if not path:
+            return
+
+        print('Exporting %d channels:' % self.hpstream.nchans)
+        print('chans = %s' % self.hpstream.chans)
+        blocksize = int(float(self.ui.blockSizeLineEdit.text()))
+        print('Exporting in blocks of %d us' % blocksize)
+        for hps in hpstreams:
+            fname = hps.fname + export_ext
+            fullfname = os.path.join(path, fname)
+            fulljsonfname = fullfname + '.json'
+            print('Exporting %s data to %r' % (export_msg, fullfname))
+            with open(fullfname, 'wb') as datf:
+                t0s = np.arange(hps.t0, hps.t1, blocksize)
+                for t0 in t0s:
+                    t1 = t0 + blocksize
+                    #print('%d to %d us' % (t0, t1))
+                    printflush('.', end='') # succint progress indicator
+                    wave = hps[t0:t1]
+                    #if t0 == t0s[-1]:
+                    #    print('last block asked:', t0, t1)
+                    #    print('last block received:', wave.ts[0], wave.ts[-1])
+                    wave.data.T.tofile(datf) # write in column-major (Fortran) order
+                print() # newline
+                core.write_dat_json(hps, fulljsonfname)
+        print('Done exporting %s data' % export_msg)
+
+        # only return path and fname if we're only exporting to a single file:
+        if len(hpstreams) == 1:
+            return path, fname
+
+    @QtCore.pyqtSlot()
     def on_actionExportLFPZipFiles_triggered(self):
-        self.exportLFPWaveforms(format='binary')
+        self.export_lpstream(format='binary')
 
     @QtCore.pyqtSlot()
     def on_actionExportLFPCSVFiles_triggered(self):
-        self.exportLFPWaveforms(format='text')
+        self.export_lpstream(format='text')
 
-    def exportLFPWaveforms(self, format='binary'):
-        """Export LFP waveform data to binary .lfp.zip file(s) or text .lfp.csv file(s)
-        to user-designated basepath"""
-        caption = "Export LFP waveforms to binary .lfp.zip files"
+    def export_lpstream(self, format='binary'):
+        """Export low-pass stream (LFP) data as binary .lfp.zip file(s) or text .lfp.csv
+        file(s) in user-designated basepath"""
+        if not self.lpstream:
+            print('First open a stream!')
+            return
+        format2ext = {'binary': '.lfp.zip', 'text': '.lfp.csv'}
+        ext = format2ext[format]
+        caption = "Export low-pass data to %s %s files" % (format, ext)
         basepath = getExistingDirectory(self, caption=caption, directory=self.sortpath)
         basepath = str(basepath)
         if not basepath:
             return
-        try: # self.lpstream is a MultiStream?
-            streams = self.lpstream.streams
-        except AttributeError: # self.lpstream is a normal Stream
-            streams = [self.lpstream]
-        if format == 'binary':
-            ext = '.lfp.zip'
-        elif format == 'text':
-            ext = '.lfp.csv'
-        else:
-            raise ValueError("invalid format: %r" % format)
-        print('exporting LFP waveform data to:')
-        for stream in streams:
-            path = os.path.join(basepath, stream.srcfnameroot)
+        if self.lpstream.is_multi(): # self.lpstream is a MultiStream
+            lpstreams = self.lpstream.streams
+        else: # self.lpstream is a single Stream
+            lpstreams = [self.lpstream]
+        print('Exporting low-pass data to:')
+        for lps in lpstreams:
+            path = os.path.join(basepath, lps.srcfnameroot)
             try: os.mkdir(path)
             except OSError: pass # path already exists?
-            fullfname = os.path.join(path, stream.srcfnameroot+ext)
-            s = stream
-            wave = s[s.t0:s.t1]
-            if format == 'binary':
-                chanpos = s.probe.siteloc_arr()
-                uVperAD = s.converter.AD2uV(1)
-                with open(fullfname, 'wb') as f:
-                    np.savez_compressed(f, data=wave.data, chans=wave.chans, t0=s.t0,
-                                        t1=s.t1, tres=s.tres, chanpos=chanpos,
-                                        uVperAD=uVperAD)
-            elif format == 'text':
-                np.savetxt(fullfname, wave.data, fmt='%d', delimiter=',') # data should be int
-            else:
-                raise ValueError('unknown format: %r' % format)
+            fullfname = os.path.join(path, lps.srcfnameroot+ext)
             print(fullfname)
+            # collect low-pass data in blocks, to prevent MemoryErrors when trying to
+            # low-pass filter an entire raw ephys data file:
+            blocksize = int(float(self.ui.blockSizeLineEdit.text())) # allow exp notation
+            t0s = np.arange(lps.t0, lps.t1, blocksize)
+            data = []
+            for t0 in t0s:
+                t1 = t0 + blocksize
+                wave = lps[t0:t1]
+                data.append(wave.data)
+            # concatenate data blocks horizontally in time:
+            data = np.hstack(data)
+            if format == 'binary':
+                chanpos = lps.probe.siteloc_arr()
+                uVperAD = lps.converter.AD2uV(1)
+                with open(fullfname, 'wb') as f:
+                    np.savez_compressed(f, data=data, chans=wave.chans, t0=lps.t0,
+                                        t1=lps.t1, tres=lps.tres, chanpos=chanpos,
+                                        chan0=lps.probe.chan0, probename=lps.probe.name,
+                                        uVperAD=uVperAD)
+            else: # format == 'text'
+                np.savetxt(fullfname, data, fmt='%d', delimiter=',') # data should be int
+        print('Done exporting low-pass data')
 
     @QtCore.pyqtSlot()
-    def on_actionExportDatFiles_triggered(self):
-        ## optionally bring up folder selection dialog box here
-        self.exportDat()
+    def on_actionExportHighPassEnvelopeDatFiles_triggered(self):
+        self.export_hp_envelope()
 
-    def exportDat(self):
-        """Export raw ephys data to .dat file, in (ti, chani) order"""
-        try:
-            self.hpstream.f.export_dat()
-        except AttributeError:
-            raise NotImplementedError("Can't (yet) export raw ephys data from %s to .dat")
+    @QtCore.pyqtSlot()
+    def on_actionExportHighPassBipolarRefEnvelopeDatFiles_triggered(self):
+        self.export_hp_envelope(bipolarref=True)
+
+    def export_hp_envelope(self, sampfreq=2000, f0=None, f1=500, bipolarref=False):
+        """Export envelope of high-pass stream to user-designated path, using current
+        preprocessing settings (filtering, CAR, and resampling), to .envl.dat file(s) with
+        associated .envl.dat.json file describing the preprocessing that was done. Decimate
+        output to get sampfreq. Export chans in order of depth, superficial to deep.
+        bipolarref: optionally take each channel's raw data to be the difference of the two
+        immediately spatially adjacent channels, before calculating the envelope"""
+        if not self.hpstream:
+            print('First open a stream!')
+            return
+        if self.hpstream.is_multi(): # self.hpstream is a MultiStream
+            hpstreams = self.hpstream.streams
+        else: # self.hpstream is a single Stream
+            hpstreams = [self.hpstream]
+        defaultpath = hpstreams[0].f.path
+        caption = "Export envelope of high-pass, preprocessed data to .envl.dat files"
+        path = str(getExistingDirectory(self, caption=caption, directory=defaultpath))
+        if not path:
+            return
+        print('Exporting high-pass envelope data to:')
+        for hps in hpstreams:
+            assert hps.sampfreq % sampfreq == 0
+            decimatex = intround(hps.sampfreq / sampfreq)
+            fullfname = os.path.join(path, hps.fname + '.envl.dat')
+            fulljsonfname = fullfname + '.json'
+            print(fullfname)
+            # excess data to get at either end of each block, to eliminate
+            # filtering edge effects:
+            xs = core.XSWIDEBANDPOINTS * hps.rawtres # us
+            # sort channels for export by depth instead of by ID:
+            # get ypos of each enabled site:
+            enabledchans = self.hpstream.chans
+            ypos = [ self.hpstream.probe.SiteLoc[chan][1] for chan in enabledchans ]
+            ysortis = np.argsort(ypos)
+            ychans = list(enabledchans[ysortis])
+            with open(fullfname, 'wb') as datf:
+                blocksize = int(float(self.ui.blockSizeLineEdit.text())) # allow exp notation
+                t0s = np.arange(hps.t0, hps.t1, blocksize)
+                for t0 in t0s:
+                    t1 = t0 + blocksize
+                    t0xs, t1xs = t0-xs, t1+xs
+                    wave = hps[t0xs:t1xs] # get excess range of data
+                    data = wave.data[ysortis] # sort chans by depth
+                    chans = wave.chans[ysortis]
+                    assert list(chans) == ychans
+                    if bipolarref:
+                        # set each channel to be the difference of the two immediately
+                        # spatially adjacent channels:
+                        data[1:-1] = data[:-2] - data[2:]
+                        data[[0, -1]] = 0 # null out the first and last channel
+                    # get envelope of data by rectifying and low-pass filtering:
+                    data = core.envelope_filt(data, sampfreq=hps.sampfreq,
+                                              f0=f0, f1=f1) # float64
+                    # ensure data limits fall within int16:
+                    iint16 = np.iinfo(np.int16)
+                    assert data.max() <= iint16.max
+                    assert data.min() >= iint16.min
+                    data = np.int16(data) # convert float64 to int16
+                    t0i, t1i = wave.ts.searchsorted([t0, t1]) # get indices to remove excess
+                    data = data[:, t0i:t1i:decimatex] # remove excess and decimate
+                    data.T.tofile(datf) # write in column-major (Fortran) order
+                envelope = odict()
+                envelope['meth'] = 'abs'
+                envelope['bipolar_ref'] = bipolarref
+                envelope['filter_meth'] = 'BW'
+                envelope['f0'] = f0
+                envelope['f1'] = f1
+                core.write_dat_json(hps, fulljsonfname, sampfreq=sampfreq,
+                                    chans=ychans, chan_order='depth', envelope=envelope)
+        print('Done exporting high-pass envelope data')
+
+    @QtCore.pyqtSlot()
+    def on_actionExportRawDataDatFiles_triggered(self):
+        self.export_raw_dat()
+
+    def export_raw_dat(self):
+        """Export raw ephys data of enabled chans concatenated across all files in current
+        track, to .dat file in user-designated path. This works by first turning off all
+        filtering, CAR, and resampling, then calling self.export_hpstream(), then restoring
+        filtering, CAR, and resampling settings. Also export channel map file in .mat format
+        for KiloSort"""
+        print('Exporting raw ephys data to .dat file')
+
+        # save current hpstream filtering CAR and sampling settings:
+        stream = self.hpstream
+        if not stream:
+            print('First open a stream!')
+            return
+        filtmeth = stream.filtmeth
+        car = stream.car
+        sampfreq = stream.sampfreq
+        shcorrect = stream.shcorrect
+
+        # set hpstream to show raw data:
+        print('Temporarily disabling filtering, CAR, and resampling for raw export')
+        self.SetFiltmeth(None)
+        self.SetCAR(None)
+        self.SetSampfreq(stream.rawsampfreq)
+        if stream.ext != '.srf':
+            self.SetSHCorrect(False) # leave it enabled for .srf, data is wrong w/o it
+
+        # do the export:
+        if stream.is_multi(): # it's a MultiStream
+            cat = True # concatenate
+        else: # it's a single Stream
+            cat = False # nothing to concatenate
+        result = self.export_hpstream(cat=cat, export_msg='raw', export_ext='.dat')
+        if result:
+            path, datfname = result
+
+        # restore hpstream settings:
+        print('Restoring filtering, CAR, and resampling settings')
+        self.SetFiltmeth(filtmeth)
+        self.SetCAR(car)
+        self.SetSampfreq(sampfreq)
+        self.SetSHCorrect(shcorrect)
+
+        if not result:
+            print('Raw data export cancelled')
+            return
+
+        # write KiloSort channel map .mat file, indicate which chans are included in the .dat
+        datfnameML = matlabize(datfname) # make suitable for use as MATLAB script name
+        chanmapfname = datfnameML + '_ks_chanmap.mat'
+        fullchanpmapfname = os.path.join(path, chanmapfname)
+        core.write_ks_chanmap_mat(stream, fullchanpmapfname)
+
+        # write KiloSort config .m file:
+        with open('./templates/kilosort/ks_config.m') as templateksconfigf:
+            ksconfigstr = templateksconfigf.read()
+        # nclusts for KiloSort to use: 3x nchans, rounded up to nearest multiple of 32:
+        nclusts = intceil(3 * stream.nchans / 32) * 32
+        ksconfigstr = ksconfigstr.format(DATFNAME=datfname,
+                                         KSRESULTSFNAME=datfname + '.ks_results',
+                                         FS=stream.rawsampfreq,
+                                         NCHANS=stream.nchans,
+                                         NCLUSTS=nclusts,
+                                         CHANMAPFNAME=chanmapfname)
+        ksconfigfname = datfnameML + '_ks_config.m'
+        fullksconfigfname = os.path.join(path, ksconfigfname)
+        with open(fullksconfigfname, 'w') as ksconfigf:
+            ksconfigf.write(ksconfigstr)
+        print('Wrote KiloSort config file %r' % fullksconfigfname)
+
+        # write KiloSort run .m file:
+        with open('./templates/kilosort/ks_run.m') as templateksrunf:
+            ksrunstr = templateksrunf.read()
+        ksrunstr = ksrunstr.format(KSCONFIGFNAME=ksconfigfname)
+        ksrunfname = datfnameML + '_ks_run.m'
+        fullksrunfname = os.path.join(path, ksrunfname)
+        with open(fullksrunfname, 'w') as ksrunf:
+            ksrunf.write(ksrunstr)
+        print('Wrote KiloSort run file %r' % fullksrunfname)
 
     @QtCore.pyqtSlot()
     def on_actionConvertKiloSortNpy2EventsZip_triggered(self):
@@ -478,10 +769,10 @@ class SpykeWindow(QtGui.QMainWindow):
         if v > lv:
             raise RuntimeError('versioning error')
         if v == lv:
-            print('no update necessary')
+            print('No update necessary')
             return
         if v < 0.3:
-            print("can't auto update from sort version < 0.3")
+            print("Can't auto update from sort version < 0.3")
             return
         if v == 0.3:
             v = self.update_0_3_to_0_4()
@@ -499,32 +790,36 @@ class SpykeWindow(QtGui.QMainWindow):
             v = self.update_0_9_to_1_0()
         if v == 1.0:
             v = self.update_1_0_to_1_1()
-        print('now save me!')
+        if v == 1.1:
+            v = self.update_1_1_to_1_2()
+        if v == 1.2:
+            v = self.update_1_2_to_1_3()
+        print('Now save me!')
             
     def update_0_3_to_0_4(self):
         """Update sort 0.3 to 0.4:
             - reload all spike waveforms and fix all of their time values
         """        
-        print('updating sort from version 0.3 to 0.4')
+        print('Updating sort from version 0.3 to 0.4')
         s = self.sort
         sids = np.arange(s.nspikes)
-        s.reloadSpikes(sids)
+        s.reload_spikes(sids)
         # add sids to the set of dirtysids to be resaved to .wave file:
         self.dirtysids.update(sids)
         s.__version__ = '0.4' # update
-        print('done updating sort from version 0.3 to 0.4')
+        print('Done updating sort from version 0.3 to 0.4')
         return float(s.__version__)
         
     def update_0_4_to_0_5(self):
         """Update sort 0.4 to 0.5:
             - rename sort.sortfname to sort.fname
         """
-        print('updating sort from version 0.4 to 0.5')
+        print('Updating sort from version 0.4 to 0.5')
         s = self.sort
         s.fname = s.sortfname
         del s.sortfname
         s.__version__ = '0.5' # update
-        print('done updating sort from version 0.4 to 0.5')
+        print('Done updating sort from version 0.4 to 0.5')
         return float(s.__version__)
 
     def update_0_5_to_0_6(self):
@@ -533,7 +828,7 @@ class SpykeWindow(QtGui.QMainWindow):
               'tis' and 'dt' respectively
             - remove unused 'cid', 's0' and 's1' fields from sort.spikes, reorder fields
         """
-        print('updating sort from version 0.5 to 0.6')
+        print('Updating sort from version 0.5 to 0.6')
         s = self.sort
         names = list(s.spikes.dtype.names) # convert from tuple
         phasetis_index = names.index('phasetis')
@@ -572,19 +867,19 @@ class SpykeWindow(QtGui.QMainWindow):
             c.normpos['dt'] = c.normpos.pop('dphase')
 
         s.__version__ = '0.6' # update
-        print('done updating sort from version 0.5 to 0.6')
+        print('Done updating sort from version 0.5 to 0.6')
         return float(s.__version__)
 
     def update_0_6_to_0_7(self):
         """Update sort 0.6 to 0.7:
             - replace sort.TW class attribute with sort.tw instance attribute
         """
-        print('updating sort from version 0.6 to 0.7')
+        print('Updating sort from version 0.6 to 0.7')
         s = self.sort
         # Sort.TW class attrib was (-500, 500) in version 0.6
         s.tw = -500, 500
         s.__version__ = '0.7' # update
-        print('done updating sort from version 0.6 to 0.7')
+        print('Done updating sort from version 0.6 to 0.7')
         return float(s.__version__)
 
     def update_0_7_to_0_8(self):
@@ -597,7 +892,7 @@ class SpykeWindow(QtGui.QMainWindow):
             - rename MultiStream attrib .srffnames -> .fnames
             - add potentially missing sort.npcsperchan attrib
         """
-        print('updating sort from version 0.7 to 0.8')
+        print('Updating sort from version 0.7 to 0.8')
         s = self.sort
         stream = s.stream
         classname = stream.__class__.__name__
@@ -620,21 +915,21 @@ class SpykeWindow(QtGui.QMainWindow):
             s.npcsperchan = NPCSPERCHAN
 
         s.__version__ = '0.8' # update
-        print('done updating sort from version 0.7 to 0.8')
+        print('Done updating sort from version 0.7 to 0.8')
         return float(s.__version__)
 
     def update_0_8_to_0_9(self):
         """Update sort 0.8 to 0.9:
             - add sort.filtmeth attrib, init to None
         """
-        print('updating sort from version 0.8 to 0.9')
+        print('Updating sort from version 0.8 to 0.9')
         s = self.sort
         try:
             s.filtmeth
         except AttributeError:
             s.filtmeth = None
         s.__version__ = '0.9' # update
-        print('done updating sort from version 0.8 to 0.9')
+        print('Done updating sort from version 0.8 to 0.9')
         return float(s.__version__)
 
     def update_0_9_to_1_0(self):
@@ -642,7 +937,7 @@ class SpykeWindow(QtGui.QMainWindow):
             - add nlockchans and lockchans fields to spike record
             - add detector.lockrx attrib
         """
-        print('updating sort from version 0.9 to 1.0')
+        print('Updating sort from version 0.9 to 1.0')
         s = self.sort
         oldspikes = s.spikes
 
@@ -676,33 +971,70 @@ class SpykeWindow(QtGui.QMainWindow):
         s.detector.lockrx = 0.0 # set to 0 to indicate it wasn't used during detection
 
         s.__version__ = '1.0' # update
-        print('done updating sort from version 0.9 to 1.0')
+        print('Done updating sort from version 0.9 to 1.0')
         return float(s.__version__)
 
     def update_1_0_to_1_1(self):
         """Update sort 1.0 to 1.1:
             - add sort.car attrib, init to None
         """
-        print('updating sort from version 1.0 to 1.1')
+        print('Updating sort from version 1.0 to 1.1')
         s = self.sort
         try:
             s.car
         except AttributeError:
             s.car = None
         s.__version__ = '1.1' # update
-        print('done updating sort from version 1.0 to 1.1')
+        print('Done updating sort from version 1.0 to 1.1')
+        return float(s.__version__)
+
+    def update_1_1_to_1_2(self):
+        """Update sort 1.1 to 1.2:
+            - add stream.adapter, fileheader.adapter & fileheader.adaptername, init to None
+        """
+        print('Updating sort from version 1.1 to 1.2')
+        s = self.sort
+        if s.stream.is_multi():
+            s.stream.adapter = None
+            streams = s.stream.streams
+        else: # it's a single stream
+            streams = [s.stream]
+        for stream in streams: # iterate over all single streams
+            stream.adapter = None
+            if stream.ext in ['.ns6', '.dat']:
+                stream.f.fileheader.adapter = None
+                stream.f.fileheader.adaptername = None
+        s.__version__ = '1.2' # update
+        print('Done updating sort from version 1.1 to 1.2')
+        return float(s.__version__)
+
+    def update_1_2_to_1_3(self):
+        """Update sort 1.2 to 1.3:
+            - rename class (done by core.unpickler_find_global()):
+                - A1x64_Poly2_6mm_23s_160 -> A1x64
+        """
+        print('Updating sort from version 1.2 to 1.3')
+        s = self.sort
+        classname = s.probe.__class__.__name__
+        print('sort.probe class is now %r' % classname)
+        print('sort.probe.name was %r' % s.probe.name)
+        s.probe.name = 'A1x64' # update name attribute
+        print('sort.probe.name is now %r' % s.probe.name)
+        s.__version__ = '1.3' # update
+        print('Done updating sort from version 1.2 to 1.3')
         return float(s.__version__)
 
     @QtCore.pyqtSlot()
     def on_actionCloseSort_triggered(self):
         # TODO: add confirmation dialog if Sort not saved
         self.CloseSortFile()
-        print('closed sort')
+        print('Closed sort')
 
     @QtCore.pyqtSlot()
     def on_actionCloseStream_triggered(self):
-        self.CloseStream()
-        print('closed stream')
+        if self.hpstream is not None:
+            self.CloseStream()
+            print('Closed stream')
 
     @QtCore.pyqtSlot()
     def on_actionQuit_triggered(self):
@@ -720,10 +1052,16 @@ class SpykeWindow(QtGui.QMainWindow):
             sw = self.windows['Sort']
         except KeyError:
             QtGui.QMainWindow.keyPressEvent(self, event) # pass it on
-        if key in [Qt.Key_Escape, Qt.Key_E]: # deselect all spikes and clusters in Sort window
+        if key == Qt.Key_A:
+            self.ui.plotButton.click()
+        elif key == Qt.Key_N:
+            self.ui.normButton.click()
+        elif key in [Qt.Key_Escape, Qt.Key_E]:
             sw.clear()
         elif key == Qt.Key_R: # doesn't fire when certain widgets have focus
             sw.on_actionSelectRandomSpikes_triggered()
+        elif key == Qt.Key_B:
+            sw.on_actionAlignBest_triggered()
 
     @QtCore.pyqtSlot()
     def on_actionUndo_triggered(self):
@@ -731,12 +1069,12 @@ class SpykeWindow(QtGui.QMainWindow):
         try:
             cc = self.cchanges[self.cci]
         except IndexError:
-            print('nothing to undo')
+            print('Nothing to undo')
             return
-        print('undoing: %s' % cc.message)
+        print('Undoing: %s' % cc.message)
         self.ApplyClusterChange(cc, direction='back')
         self.cci -= 1 # move pointer one change back on the stack
-        print('undo complete')
+        print('Undo complete')
 
     @QtCore.pyqtSlot()
     def on_actionRedo_triggered(self):
@@ -744,12 +1082,12 @@ class SpykeWindow(QtGui.QMainWindow):
         try:
             cc = self.cchanges[self.cci+1]
         except IndexError:
-            print('nothing to redo')
+            print('Nothing to redo')
             return
-        print('redoing: %s' % cc.message)
+        print('Redoing: %s' % cc.message)
         self.ApplyClusterChange(cc, direction='forward')
         self.cci += 1 # move pointer one change forward on the stack
-        print('redo complete')
+        print('Redo complete')
 
     @QtCore.pyqtSlot()
     def on_actionSpikeWindow_triggered(self):
@@ -824,6 +1162,11 @@ class SpykeWindow(QtGui.QMainWindow):
         self.SetFiltmeth('BW')
 
     @QtCore.pyqtSlot()
+    def on_actionFiltmethBWNC_triggered(self):
+        """Non-causal Butterworth filtering menu choice event"""
+        self.SetFiltmeth('BWNC')
+
+    @QtCore.pyqtSlot()
     def on_actionFiltmethWMLDR_triggered(self):
         """WMLDR filtering menu choice event"""
         self.SetFiltmeth('WMLDR')
@@ -884,6 +1227,11 @@ class SpykeWindow(QtGui.QMainWindow):
         self.SetSampfreq(100000)
 
     @QtCore.pyqtSlot()
+    def on_action120kHz_triggered(self):
+        """120kHz menu choice event"""
+        self.SetSampfreq(120000)
+
+    @QtCore.pyqtSlot()
     def on_actionSampleAndHoldCorrect_triggered(self):
         """Sample & hold menu event"""
         enable = self.ui.actionSampleAndHoldCorrect.isChecked()
@@ -942,8 +1290,18 @@ class SpykeWindow(QtGui.QMainWindow):
 
     @QtCore.pyqtSlot(int)
     def on_slider_valueChanged(self, slideri):
-        t = slideri * SLIDERTRES
+        t = slideri * self.hpstream.tres
         self.seek(t)
+
+    def update_slider(self):
+        """Update slider limits and step sizes. Slider ticks are multiples of tres"""
+        tres = self.hpstream.tres
+        self.ui.slider.setRange(intround(self.trange[0] / tres),
+                                intround(self.trange[1] / tres))
+        self.ui.slider.setValue(intround(self.t / tres))
+        self.ui.slider.setSingleStep(1)
+        self.ui.slider.setPageStep(intround((self.spiketw[1]-self.spiketw[0]) / tres))
+        self.ui.slider.setInvertedControls(True)
 
     @QtCore.pyqtSlot()
     def on_detectButton_clicked(self):
@@ -1045,14 +1403,14 @@ class SpykeWindow(QtGui.QMainWindow):
         if len(sids) == 0: # nothing selected
             sids = spikes['id'] # all spikes (sorted)
             oldclusters = s.clusters.values() # all clusters
-        dims = self.GetClusteringDims()
+        dims = self.GetClusterPlotDims()
         comps = np.any([ dim.startswith('c') and dim[-1].isdigit() for dim in dims ])
         subsidss = [] # sids grouped into subclusters, each to be clustered separately
         msgs = []
         t0 = time.time()
         if comps and np.all(sids == spikes['id']): # doing PCA/ICA on all spikes
             if not oldclusters:
-                print("no existing clusters to sequentially do PCA/ICA on and subcluster")
+                print("No existing clusters to sequentially do PCA/ICA on and subcluster")
                 return
             # partition data by existing clusters before clustering,
             # restrict to only clustered spikes:
@@ -1065,8 +1423,12 @@ class SpykeWindow(QtGui.QMainWindow):
             subsidss.append(sids)
             msgs.append('%d selected sids' % len(sids))
         nids = self.subcluster(sids, subsidss, msgs, dims)
+<<<<<<< HEAD
         try: print('clustering took %.3f sec' % (time.time()-t0))
         except: pass
+=======
+        print('Clustering took %.3f sec' % (time.time()-t0))
+>>>>>>> upstream/master
         self.apply_clustering(oldclusters, sids, nids, verb='GAC')
 
     def subcluster(self, sids, subsidss, msgs, dims):
@@ -1075,7 +1437,7 @@ class SpykeWindow(QtGui.QMainWindow):
         # init nids output array to be all unclustered:
         nids = np.zeros(len(sids), dtype=np.int32)
         for subsids, msg in zip(subsidss, msgs):
-            print('clustering %s on dims %r' % (msg, dims))
+            print('Clustering %s on dims %r' % (msg, dims))
             subnids = self.gac(subsids, dims) # subclustering result
             ci = subnids > 0 # consider only the clustered sids
             subsids = subsids[ci]
@@ -1101,7 +1463,7 @@ class SpykeWindow(QtGui.QMainWindow):
         # each row in uchancombos is a unique combination of chans:
         uchancombos = np.unique(strchans).view(chans.dtype).reshape(-1, chans.shape[1])
         if len(uchancombos) == 1:
-            print("selected spikes all share the same set of channels, can't chancombosplit")
+            print("Selected spikes all share the same set of channels, can't chancombosplit")
             return
         # init to unclustered, shouldn't be any once done:
         nids = np.zeros(len(sids), dtype=np.int32)
@@ -1123,7 +1485,7 @@ class SpykeWindow(QtGui.QMainWindow):
         maxchans = spikes[sids]['chan']
         umaxchans = np.unique(maxchans)
         if len(umaxchans) == 1:
-            print("selected spikes all share the same set of max channels, can't maxchansplit")
+            print("Selected spikes all share the same set of max channels, can't maxchansplit")
             return
         # init to unclustered, shouldn't be any once done:
         nids = np.zeros(len(sids), dtype=np.int32)
@@ -1140,13 +1502,13 @@ class SpykeWindow(QtGui.QMainWindow):
         spikes = s.spikes
         oldclusters = self.GetClusters() # all selected clusters
         if len(oldclusters) != 2:
-            print("need to select exactly 2 clusters to split them by density")
+            print("Need to select exactly 2 clusters to split them by density")
             return
         dims = self.GetClusterPlotDims()
         try:
             X, sids = self.get_param_matrix(dims=dims)
-        except RuntimeError, errmsg:
-            print(errmsg)
+        except RuntimeError as err:
+            print(err)
             return
 
         nids = s.spikes['nid'][sids] # copy
@@ -1206,24 +1568,18 @@ class SpykeWindow(QtGui.QMainWindow):
     def gac(self, sids, dims):
         """Cluster sids along dims, using NVS's gradient ascent algorithm"""
         s = self.sort
-        waveclustering = np.any([ dim.startswith('pk') for dim in dims ])
-        if waveclustering: # do waveform clustering
-            if len(dims) > 1:
-                raise RuntimeError("Can't do high-D clustering of spike waveforms in tandem "
-                                   "with any other spike parameters as dimensions")
-            wctype = dims[0]
-            try:
-                data = self.get_waveclustering_data(sids, wctype=wctype)
-            except RuntimeError as msg:
-                print(msg)
-                return
-        else: # do spike parameter (non-wavefrom) clustering
-            data, sids = self.get_param_matrix(sids=sids, dims=dims, scale=True)
+        norm = self.ui.normButton.isChecked()
+        data, sids = self.get_param_matrix(sids=sids, dims=dims, norm=norm, scale=True)
         data = tocontig(data) # ensure it's contiguous for gac()
         # grab gac() params and run it
         self.update_sort_from_cluster_pane()
         npoints, ndims = data.shape
+<<<<<<< HEAD
         print('clustering %d points in %d-D space' % (npoints, ndims))
+=======
+        print('Clustering %d points in %d-D space' % (npoints, ndims))
+        t0 = time.time()
+>>>>>>> upstream/master
         nids = gac(data, sigma=s.sigma, rmergex=s.rmergex, rneighx=s.rneighx,
                    alpha=s.alpha, maxgrad=s.maxgrad,
                    maxnnomerges=1000, minpoints=s.minpoints)
@@ -1337,106 +1693,6 @@ class SpykeWindow(QtGui.QMainWindow):
         cc.message += ' into %r' % [c.id for c in newclusters]
         print(cc.message)
 
-    def get_waveclustering_data(self, sids, wctype='wave'):
-        s = self.sort
-        spikes = s.spikes
-
-        # find which chans are common to all sids
-        commonchans, chanslist = s.get_common_chans(sids)
-
-        # get selected chans
-        chans = self.get_selchans(sids)
-        for chan in chans:
-            if chan not in commonchans:
-                raise RuntimeError("chan %d not common to all spikes, pick from %r"
-                                   % (chan, list(commonchans)))
-        nchans = len(chans)
-        if nchans == 0:
-            raise RuntimeError("no channels selected")
-        print('clustering on chans %r' % list(chans))
-
-        # collect data from chans from all spikes:
-        nspikes = len(sids)
-        nt = s.wavedata.shape[2]
-        data = np.zeros((nspikes, nchans, nt), dtype=np.float32)
-        for sii, sid in enumerate(sids):
-            spikechans = chanslist[sii]
-            spikechanis = np.searchsorted(spikechans, chans)
-            data[sii] = s.wavedata[sid, spikechanis]
-
-        # find mean waveform of selected spikes, evenly sampling for speed
-        # if nspikes exceeds a threshold:
-        if nspikes > MEANWAVEMAXSAMPLES:
-            step = nspikes // MEANWAVEMAXSAMPLES + 1 
-            print('get_waveclustering_data() sampling every %d spikes instead of all %d'
-                  % (step, nspikes))
-            siis = np.arange(0, nspikes, step) # eq'v to: np.arange(nspikes)[::step]
-            template = data[siis].mean(axis=0)
-        else:
-            template = data.mean(axis=0)
-
-        # TODO: add stdev2, stdev6 and stdev10 that use the most variable points
-        # per chan, or somehow, the most non-gaussian points per chan
-
-        if wctype == 'pk2':
-            # use data at peaks of template
-            ntis = 2
-            tis = np.zeros((nchans, ntis), dtype=int)
-            for chani in range(nchans):
-                t0, t1 = np.sort([template[chani].argmin(), template[chani].argmax()])
-                tis[chani] = t0, t1
-        elif wctype == 'pk6':
-            # use data at peaks of template, and before and after each peak
-            ntis = 6
-            tis = np.zeros((nchans, ntis), dtype=int)
-            for chani in range(nchans):
-                t1, t4 = np.sort([template[chani].argmin(), template[chani].argmax()])
-                dt3 = max((t4 - t1) / 3.0, 1) # 1/3 the distance between peaks
-                t0 = max(t1-dt3, 0)
-                t2 = min(t1+dt3, nt-1)
-                t3 = max(t4-dt3, 0)
-                t5 = min(t4+dt3, nt-1)
-                tis[chani] = intround([t0, t1, t2, t3, t4, t5])
-        elif wctype == 'pk10':
-            # use data at peaks of template, and before and after each peak
-            ntis = 10
-            tis = np.zeros((nchans, ntis), dtype=int)
-            for chani in range(nchans):
-                t2, t7 = np.sort([template[chani].argmin(), template[chani].argmax()])
-                dt5 = max((t7 - t2) / 5.0, 1) # 1/5 the distance between peaks
-                t0 = max(t2-2*dt5, 0)
-                t1 = max(t2-dt5, 0)
-                t3 = min(t2+dt5, nt-1)
-                t4 = min(t2+2*dt5, nt-1)
-                t5 = max(t7-2*dt5, 0)
-                t6 = max(t7-dt5, 0)
-                t8 = min(t7+dt5, nt-1)
-                t9 = min(t7+2*dt5, nt-1)
-                tis[chani] = intround([t0, t1, t2, t3, t4, t5, t6, t7, t8, t9])
-        else:
-            raise RuntimeError('unknown wctype %r' % wctype)
-
-        print('tis =')
-        print(tis)
-        for chani in range(nchans):
-            assert core.is_unique(tis[chani])
-            # TODO: if it isn't unique, throw out the ti repeats per channel, and have
-            # potentially a different number of tis per chan. Would have to change the
-            # fancy indexing operation below...
-
-        # grab each spike's data at tis, using fancy indexing
-        # see core.rowtake() or util.rowtake_cy() for indexing explanation
-        data = data[:, np.arange(nchans)[:, None], tis] # shape = nspikes, nchans, ntis
-        data.shape = nspikes, -1 # reshape to 2D, ie flatten across chans
-
-        # normalize by the std of the dim with the biggest std - this allows use of reasonable
-        # value of sigma (~0.15), similar to param clustering, and independent of what the
-        # amplifier gain was during recording
-        norm = data.std(axis=0).max()
-        data /= norm
-        print('normalized waveform data by %f' % norm)
-        return data
-
     @QtCore.pyqtSlot()
     def on_x0y0VppButton_clicked(self):
         """Cluster pane x0y0Vpp button click. Set plot dims to x0, y0, and Vpp"""
@@ -1474,7 +1730,7 @@ class SpykeWindow(QtGui.QMainWindow):
         self.ui.zDimComboBox.setCurrentIndex(zi)
         self.on_plotButton_clicked() # replot
 
-    def get_param_matrix(self, sids=None, dims=None, scale=True):
+    def get_param_matrix(self, sids=None, dims=None, norm=False, scale=True):
         """Given list of dims, get clustering parameter matrix according to
         current selection of sids and channels"""
         s = self.sort
@@ -1498,8 +1754,9 @@ class SpykeWindow(QtGui.QMainWindow):
             selchans = self.get_selchans(sids)
         if comps:
             kind = str(self.ui.componentAnalysisComboBox.currentText())
+        norm = self.ui.normButton.isChecked()
         X = s.get_param_matrix(kind=kind, sids=sids, tis=tis, selchans=selchans,
-                               dims=dims, scale=scale)
+                               norm=norm, dims=dims, scale=scale)
         return X, sids
 
     def get_Xhash_args(self):
@@ -1513,7 +1770,8 @@ class SpykeWindow(QtGui.QMainWindow):
         selchans = np.asarray(self.get_selchans(sids))
         chans = self.sort.get_common_chans(sids, selchans)[0]
         npcsperchan = self.sort.npcsperchan
-        return kind, sids, tis, chans, npcsperchan
+        norm = self.ui.normButton.isChecked()
+        return kind, sids, tis, chans, npcsperchan, norm
 
     @QtCore.pyqtSlot()
     def on_plotButton_clicked(self):
@@ -1529,8 +1787,8 @@ class SpykeWindow(QtGui.QMainWindow):
         dims = self.GetClusterPlotDims()
         try:
             X, sids = self.get_param_matrix(dims=dims)
-        except RuntimeError, errmsg:
-            print(errmsg)
+        except RuntimeError as err:
+            print(err)
             return
         if len(X) == 0:
             return # nothing to plot
@@ -1540,10 +1798,20 @@ class SpykeWindow(QtGui.QMainWindow):
         sw.PlotClusterHistogram(X, nids) # auto update cluster histogram plot
 
     @QtCore.pyqtSlot()
+    def on_normButton_clicked(self):
+        """Cluster pane norm button click"""
+        if self.ui.normButton.isChecked():
+            print('Normalizing spike amplitudes')
+        else:
+            print('Un-normalizing spike amplitudes')
+        self.windows['Sort'].panel.updateAllItems() # refresh plotted waveforms
+        self.on_plotButton_clicked() # refresh cluster plot
+
+    @QtCore.pyqtSlot()
     def get_cleaning_density_hist(self):
         """Calculate histogram of point densities of selected spikes over selected
         clustering dimensions from origin"""
-        dims = self.GetClusteringDims()
+        dims = self.GetClusterPlotDims()
         X, sids = self.get_param_matrix(dims=dims)
         # each dim in X has 0 mean, so X is centered on origin
         X = np.float64(X) # convert to double precision
@@ -1606,7 +1874,7 @@ class SpykeWindow(QtGui.QMainWindow):
         cids = np.sort(self.sort.clusters.keys())
         sids = self.sort.usids.copy()
         ncids, nsids = len(cids), len(sids)
-        print('calculating rmserror between all %d clusters and all %d unsorted spikes'
+        print('Calculating rmserror between all %d clusters and all %d unsorted spikes'
               % (ncids, nsids))
         errs = np.empty((ncids, nsids), dtype=np.float32)
         errs.fill(np.inf) # TODO: replace with sparse matrix with np.inf as default value
@@ -1625,7 +1893,7 @@ class SpykeWindow(QtGui.QMainWindow):
                 errs[cidi, sidi] = core.rms(ndata - sdata)
         errs = self.sort.converter.AD2uV(errs) # convert from AD units to uV, np.infs are OK
         self.match = Match(cids, sids, errs)
-        print('done calculating rmserror between all %d clusters and all %d unsorted spikes'
+        print('Done calculating rmserror between all %d clusters and all %d unsorted spikes'
               % (ncids, nsids))
         return self.match
         
@@ -1639,7 +1907,7 @@ class SpykeWindow(QtGui.QMainWindow):
             self.match = self.on_calcMatchErrorsButton_clicked() # (re)calc
         errs = self.match.get_best_errs(cid)
         if len(errs) == 0:
-            print('no unsorted spikes fit cluster %d' % cid)
+            print('No unsorted spikes fit cluster %d' % cid)
             return
         f = pl.gcf()
         pl.clf()
@@ -1662,7 +1930,7 @@ class SpykeWindow(QtGui.QMainWindow):
             self.match = self.on_calcMatchErrorsButton_clicked() # (re)calc
         errs = self.match.get_best_errs(cid)
         if len(errs) == 0:
-            print('no unsorted spikes fit cluster %d' % cid)
+            print('No unsorted spikes fit cluster %d' % cid)
             return
         bestsids = self.match.best[cid]
         thresh = self.ui.matchThreshSpinBox.value()
@@ -1672,7 +1940,7 @@ class SpykeWindow(QtGui.QMainWindow):
         sw = self.windows['Sort']
         sw.uslist.clearSelection()
         sw.uslist.selectRows(sidis, on=True, scrollTo=False)
-        print('matched %d spikes to cluster %d' % (len(sids), cid))
+        print('Matched %d spikes to cluster %d' % (len(sids), cid))
 
     @QtCore.pyqtSlot()
     def on_plotXcorrsButton_clicked(self):
@@ -1753,7 +2021,7 @@ class SpykeWindow(QtGui.QMainWindow):
             nids = sorted(self.sort.neurons)
 
         rmsidss = {} # dict of lists of sids to split off or remove, indexed by nid
-        print('duplicate spikes:')
+        print('Duplicate spikes:')
         for nid in nids:
             # For each pair of duplicate spikes, keep whichever has the most channel overlap
             # with neuron template. If they have same amount of overlap, keep the first one
@@ -1792,7 +2060,7 @@ class SpykeWindow(QtGui.QMainWindow):
             print('neuron %d: %r' % (nid, rmsids))
             rmsidss[nid] = rmsids
         nrm = sum([ len(rmsids) for rmsids in rmsidss.values() ])
-        print('found %d duplicate spikes' % nrm)
+        print('Found %d duplicate spikes' % nrm)
         if nrm == 0:
             return
         sw = self.windows['Sort']
@@ -1820,7 +2088,7 @@ class SpykeWindow(QtGui.QMainWindow):
         sw.uslist.updateAll()
         # cluster changes in stack no longer applicable, reset cchanges:
         del self.cchanges[:]
-        print('removed %d duplicate spikes' % nrm)
+        print('Removed %d duplicate spikes' % nrm)
 
     def GetSortedSpikes(self):
         """Return IDs of selected sorted spikes"""
@@ -1907,7 +2175,7 @@ class SpykeWindow(QtGui.QMainWindow):
         rows = [ self.sort.norder.index(selnid) for selnid in selnids ]
         nlist = self.windows['Sort'].nlist
         nlist.selectRows(rows, on)
-        #print('set rows %r to %r' % (rows, on))
+        #print('Set rows %r to %r' % (rows, on))
 
     def ToggleCluster(self, cluster):
         """Toggle selection of given cluster"""
@@ -1972,7 +2240,6 @@ class SpykeWindow(QtGui.QMainWindow):
         sw = self.windows['Sort']
         if update:
             sw.nlist.updateAll()
-        from cluster import Cluster # can't delay this any longer
         cluster = Cluster(neuron)
         s.clusters[cluster.id] = cluster
         neuron.cluster = cluster
@@ -2024,26 +2291,6 @@ class SpykeWindow(QtGui.QMainWindow):
                     gw.nids[sidis] = setnid
                 gw.colour(commonsids) # recolour commonsids according to their nids
         gw.updateGL()
-
-    def SetClusteringDims(self, dims):
-        dimlist = self.ui.dimlist
-        alldims = [ str(dimlist.item(rowi).text()) for rowi in range(dimlist.count()) ]
-        rowis = [ alldims.index(dim) for dim in dims ]
-        for rowi in rowis:
-            # there really should be an easier way, but .setSelection(QRect, ...) doesn't work?
-            #dimlist.setCurrentRow(rowi, QtGui.QItemSelectionModel.Select)
-            dimlist.item(rowi).setSelected(True) # a little nicer
-
-    def GetClusteringDims(self):
-        """Get selected clustering dimensions in dimlist. If dimlist disabled, use plot
-        dimensions instead"""
-        if not self.ui.dimlist.isEnabled():
-            return self.GetClusterPlotDims()
-        items = self.ui.dimlist.selectedItems()
-        if len(items) == 0:
-            raise RuntimeError('No clustering dimensions selected')
-        dims = [ str(item.text()) for item in items ] # dim names
-        return dims
 
     def GetClusterPlotDims(self):
         """Return 3-tuple of strings of cluster dimension names, in (x, y, z) order"""
@@ -2166,7 +2413,7 @@ class SpykeWindow(QtGui.QMainWindow):
         """Open a filename from the clicked recent file in the File menu"""
         action = self.sender()
         if action:
-            fullfname = str(action.data().toString())
+            fullfname = qvar2str(action.data())
             self.OpenFile(fullfname)
 
     def updateRecentFiles(self, fullfname=None):
@@ -2174,9 +2421,9 @@ class SpykeWindow(QtGui.QMainWindow):
         last fname opened or closed, which should hence go to the top of the list.
         Some of this code is taken from PySide's examples/mainwindows/recentfiles.py"""
         settings = QtCore.QSettings('spyke', 'spyke') # retrieve setting
-        fullfnames = settings.value('recentFileList').toList()
-        for i in range(len(fullfnames)): # convert each entry from QVariant to QString
-            fullfnames[i] = fullfnames[i].toString()
+        fullfnames = qvar2list(settings.value('recentFileList'))
+        for i in range(len(fullfnames)): # Py2: convert each entry from QVariant to QString
+            fullfnames[i] = qvar2str(fullfnames[i])
         if fullfname:
             try:
                 fullfnames.remove(fullfname)
@@ -2199,7 +2446,7 @@ class SpykeWindow(QtGui.QMainWindow):
 
     def OpenFile(self, fname):
         """Open a stream or sort file. fname in this case must contain a full path"""
-        print('opening file %r' % fname)
+        print('Opening file %r' % fname)
         head, tail = os.path.split(fname)
         assert head # make sure fname has a path to it
         base, ext = os.path.splitext(tail)
@@ -2224,8 +2471,9 @@ class SpykeWindow(QtGui.QMainWindow):
     def OpenStreamFile(self, fname):
         """Open a stream (.dat, .ns6, .srf, .track, or .tsf file) and update display
         accordingly. fname is assumed to be relative to self.streampath"""
-        if self.hpstream != None:
+        if self.hpstream is not None:
             self.CloseStream() # in case a stream is already open
+        enabledchans = None
         ext = os.path.splitext(fname)[1]
         if ext == '.dat':
             f = dat.File(fname, self.streampath) # parses immediately
@@ -2242,11 +2490,22 @@ class SpykeWindow(QtGui.QMainWindow):
             self.lpstream = f.lpstream # lowpassmultichan record (LFP) stream
         elif ext == '.track':
             fs = []
-            with open(join(self.streampath, fname), 'r') as trackfile:
+            with open(os.path.join(self.streampath, fname), 'r') as trackfile:
                 for line in trackfile: # one filename per line
-                    if line.startswith('#'): # it's a comment line
-                        continue # skip it
-                    fn = line.rstrip('\n')
+                    line = line.strip() # remove leading and trailing whitespace
+                    print('%s' % line)
+                    if not line: # blank line
+                        continue
+                    if line.startswith('#'): # comment line
+                        line = lstrip(line, '#') # remove comment character
+                        line = line.replace(' ', '') # remove all spaces
+                        if line.startswith('enabledchans='):
+                            # it's a comment line describing which chans have been set to
+                            # enabled for this track
+                            enabledchans = np.asarray(eval(lstrip(line, 'enabledchans=')))
+                            assert iterable(enabledchans)
+                        continue # to next line
+                    fn = line
                     fext = os.path.splitext(fn)[1]
                     if fext == '.dat':
                         f = dat.File(fn, self.streampath)
@@ -2255,6 +2514,8 @@ class SpykeWindow(QtGui.QMainWindow):
                     elif fext == '.srf':
                         f = surf.File(fn, self.streampath)
                         f.parse()
+                    else:
+                        raise ValueError('unknown extension %r' % fext)
                     fs.append(f) # build up list of open and parsed data file objects
             self.hpstream = MultiStream(fs, fname, kind='highpass')
             self.lpstream = MultiStream(fs, fname, kind='lowpass')
@@ -2273,12 +2534,13 @@ class SpykeWindow(QtGui.QMainWindow):
             self.sort.stream = self.hpstream # restore newly opened stream to sort
         except AttributeError: # no sort yet
             pass
-        except AssertionError: # from sort.set_stream()
-            self.CloseStream() # abort opening of the stream
-            raise RuntimeError("Open stream doesn't match the one specified in sort")
+        except ValueError: # from sort.set_stream()
+            print('Aborting opening of the stream')
+            self.CloseStream()
+            raise # re-raise the ValueError from sort.set_stream()
 
         self.updateTitle()
-        self.updateRecentFiles(join(self.streampath, fname))
+        self.updateRecentFiles(os.path.join(self.streampath, fname))
 
         self.ui.__dict__['actionFiltmeth%s' % self.hpstream.filtmeth ].setChecked(True)
         self.ui.__dict__['actionCAR%s' % self.hpstream.car ].setChecked(True)
@@ -2299,26 +2561,32 @@ class SpykeWindow(QtGui.QMainWindow):
         self.ui.dynamicNoiseXSpinBox.setValue(DYNAMICNOISEX[ext])
         self.ui.dtSpinBox.setValue(DT[ext])
 
-        self.set_chans_enabled(self.hpstream.chans, enable=True)
-        self.t = self.hpstream.t0 # set current timepoint (us)
+        # if a .sort file is already open, enable only those channels that were used
+        # by the sort's Detector:
+        try:
+            enabledchans = self.sort.detector.chans
+        except AttributeError:
+            pass
+
+        if enabledchans is None:
+            self.chans_enabled = self.hpstream.chans
+        else:
+            print('setting enabled chans = %s' % enabledchans)
+            self.chans_enabled = enabledchans
+
+        self.trange = self.hpstream.t0, self.hpstream.t1 # us
+        self.t = self.trange[0] # init current timepoint (us)
+        self.str2t = {'start': self.trange[0],
+                      'now'  : self.t,
+                      'end'  : self.trange[1]}
 
         self.SPIKEWINDOWWIDTH = self.hpstream.probe.ncols * SPIKEWINDOWWIDTHPERCOLUMN
         self.OpenWindow('Spike')
 
-        self.str2t = {'start': self.hpstream.t0,
-                      'now': self.t, # FIXME: this won't track self.t automatically
-                      'end': self.hpstream.t1}
-        self.range = (self.hpstream.t0, self.hpstream.t1) # us
-        self.ui.filePosLineEdit.setText(str(self.t))
-        self.ui.filePosStartButton.setText(str(self.hpstream.t0))
-        self.ui.filePosEndButton.setText(str(self.hpstream.t1))
-        # set all slider values in multiples of SLIDERTRES
-        self.ui.slider.setRange(self.range[0] // SLIDERTRES,
-                                self.range[1] // SLIDERTRES) # no need to round
-        self.ui.slider.setValue(self.t // SLIDERTRES)
-        self.ui.slider.setSingleStep(1)
-        self.ui.slider.setPageStep((self.spiketw[1]-self.spiketw[0]) // SLIDERTRES)
-        self.ui.slider.setInvertedControls(True)
+        self.ui.filePosLineEdit.setText('%.1f' % self.t)
+        self.ui.filePosStartButton.setText('%.1f' % self.trange[0])
+        self.ui.filePosEndButton.setText('%.1f' % self.trange[1])
+        self.update_slider() # set slider limits and step sizes
 
         self.EnableStreamWidgets(True)
 
@@ -2327,7 +2595,7 @@ class SpykeWindow(QtGui.QMainWindow):
         Return a SimpleStream. Assume no sample-and-hold correction is required, and no
         highpass filtering is required"""
         import scipy.io
-        fname = join(self.streampath, fname)
+        fname = os.path.join(self.streampath, fname)
         d = scipy.io.loadmat(fname, squeeze_me=True)
         #chan = d['chan'] # this field isn't always present
         #assert chan == 1
@@ -2409,8 +2677,8 @@ class SpykeWindow(QtGui.QMainWindow):
               and still be detected and clustered correctly
     
         """
-        with open(join(self.streampath, fname), 'rb') as f:
-            header = f.read(16)
+        with open(os.path.join(self.streampath, fname), 'rb') as f:
+            header = f.read(16).decode()
             assert header == 'Test spike file '
             version, = unpack('i', f.read(4))
 
@@ -2424,11 +2692,11 @@ class SpykeWindow(QtGui.QMainWindow):
         assume wavedata already has the correct 0 voltage offset (i.e., is signed), assume no
         bitshift is required (data is 16 bit, not 12). Assume wavedata is wideband, containing
         both spike and LFP data"""
-        try: f = open(join(self.streampath, fname), 'rb')
+        try: f = open(os.path.join(self.streampath, fname), 'rb')
         except IOError:
-            print("can't find file %r" % fname)
+            print("Can't find file %r" % fname)
             return
-        header = f.read(16)
+        header = f.read(16).decode()
         assert header == 'Test spike file '
         version, = unpack('i', f.read(4))
         assert version == 1002
@@ -2471,16 +2739,16 @@ class SpykeWindow(QtGui.QMainWindow):
         f.seek(0, 2)
         nbytes = f.tell()
         f.close()
-        print('read %d bytes, %s is %d bytes long' % (pos, fname, nbytes))
+        print('Read %d bytes, %s is %d bytes long' % (pos, fname, nbytes))
         return hpstream, lpstream
 
     def OpenTSFFile_1000(self, fname):
         """Open TSF file, version 1000. Assume wavedata is highpass spike data only"""
-        try: f = open(join(self.streampath, fname), 'rb')
+        try: f = open(os.path.join(self.streampath, fname), 'rb')
         except IOError:
-            print("can't find file %r" % fname)
+            print("Can't find file %r" % fname)
             return
-        header = f.read(16)
+        header = f.read(16).decode()
         assert header == 'Test spike file '
         version, = unpack('i', f.read(4))
         assert version == 1000
@@ -2505,10 +2773,10 @@ class SpykeWindow(QtGui.QMainWindow):
         # not all .tsf files have ground truth data at end:
         pos = f.tell()
         groundtruth = f.read()
-        if groundtruth == '': # reached EOF
+        if groundtruth == b'': # reached EOF
             nbytes = f.tell()
             f.close()
-            print('read %d bytes, %s is %d bytes long' % (pos, fname, nbytes))
+            print('Read %d bytes, %s is %d bytes long' % (pos, fname, nbytes))
             return hpstream, lpstream
         else:
             f.seek(pos) # go back and parse ground truth data
@@ -2530,7 +2798,7 @@ class SpykeWindow(QtGui.QMainWindow):
         f.seek(0, 2)
         nbytes = f.tell()
         f.close()
-        print('read %d bytes, %s is %d bytes long' % (pos, fname, nbytes))
+        print('Read %d bytes, %s is %d bytes long' % (pos, fname, nbytes))
         return hpstream, lpstream
 
     def renumber_tsf_truth(self, truth, stream):
@@ -2574,7 +2842,7 @@ class SpykeWindow(QtGui.QMainWindow):
         fullfname = os.path.join(self.eventspath, fname)
         with open(fullfname, 'rb') as f:
             d = dict(np.load(f)) # convert to an actual dict to use d.get() method
-            print('done opening .eventswave.zip file')
+            print('Done opening .eventswave.zip file')
             print('.eventswave.zip file was %d bytes long' % f.tell())
             chan = d.get('chan') # array of maxchans, one per event
             chanpos = d.get('chanpos') # array of (x, y) coords, in channel order
@@ -2599,6 +2867,7 @@ class SpykeWindow(QtGui.QMainWindow):
         uVperAD = float(uVperAD)
 
         nevents, maxnchans, nt = wavedata.shape # maxnchans is per event
+        print('wavedata.shape:', wavedata.shape)
 
         # handle optional fields:
         if chanpos is None:
@@ -2682,9 +2951,9 @@ class SpykeWindow(QtGui.QMainWindow):
         fullfname = os.path.join(self.eventspath, fname)
         with open(fullfname, 'rb') as f:
             d = dict(np.load(f)) # convert to an actual dict to use d.get() method
-            print('done opening .events.zip file')
+            print('Done opening .events.zip file')
             print('.events.zip file was %d bytes long' % f.tell())
-            spikets = d.get('spikets') # spike times
+            spikets = d.get('spikets') # spike times, us
             maxchans = d.get('maxchans') # maxchans
             nids = d.get('nids') # neuron IDs
 
@@ -2697,6 +2966,16 @@ class SpykeWindow(QtGui.QMainWindow):
             raise ValueError('missing nids')
         assert len(spikets) == len(maxchans) == len(nids)
         nspikes = len(spikets)
+
+        # check that maxchans are a subset of enabled chans in stream:
+        umaxchans = np.unique(maxchans)
+        if not np.isin(umaxchans, self.hpstream.chans).all():
+            raise RuntimeError("maxchans in %r are not a subset of currently enabled stream "
+                               "chans. Was the .events.zip file generated from a different "
+                               "set of enabled channels?\n"
+                               "maxchans: %s\n"
+                               "enabled chans: %s\n"
+                               % (fname, umaxchans, self.hpstream.chans))
 
         # create sort:
         sort = self.CreateNewSort() # create a new sort, with bound stream
@@ -2712,7 +2991,7 @@ class SpykeWindow(QtGui.QMainWindow):
         spikes['id'] = np.arange(nspikes)
         spikes['t'] = spikets
         spikes['t0'], spikes['t1'] = spikets+sort.tw[0], spikets+sort.tw[1]
-        spikes['chan'] = maxchans # one per spike
+        spikes['chan'] = maxchans # one maxchan per spike
         # convert inclnbhdi to inclnbhd, taking chan and returning inclchans instead of taking
         # chani and returning inclchanis:
         inclnbhd = {}
@@ -2734,9 +3013,13 @@ class SpykeWindow(QtGui.QMainWindow):
         # init wavedata:
         #from scipy import sparse;   sparse.csr_matrix((nspikes,det.maxnchansperspike,det.maxnt),dtype='int16')
         sort.wavedata = np.zeros((nspikes, det.maxnchansperspike, det.maxnt), dtype=np.int16)
+<<<<<<< HEAD
         #sort.wavedata=np.zeros((1,det.maxnchansperspike,det.maxnt),dtype=np.int16)
+=======
+        print('wavedata.shape:', sort.wavedata.shape)
+>>>>>>> upstream/master
         # "re"load spike wavedata based on imported events:
-        sort.reloadSpikes(spikes['id'])
+        sort.reload_spikes(spikes['id'])
 
         sort.update_usids() # required for self.on_plotButton_clicked()
 
@@ -2768,7 +3051,7 @@ class SpykeWindow(QtGui.QMainWindow):
         # find tis and do spatial localization of each spike:
         ntis, nalignis = {}, {} # tis and aligni derived from each neuron's mean waveform
         for neuron in sort.neurons.values():
-            nwave = neuron.get_wave() # updates and returns mean waveform
+            nwave = neuron.get_wave() # update and return mean waveform
             mintis = nwave.data.argmin(axis=1)
             maxtis = nwave.data.argmax(axis=1)
             ntis[neuron.id] = np.column_stack([mintis, maxtis])
@@ -2776,54 +3059,68 @@ class SpykeWindow(QtGui.QMainWindow):
             nalignis[neuron.id] = np.argmin([mintis.std(), maxtis.std()])
         AD2uV = sort.converter.AD2uV
         weights2f = sort.extractor.weights2spatial
+        weights2spatialmean = sort.extractor.weights2spatialmean
         f = sort.extractor.f
         nreject = 0 # number spikes rejected during spatial localization
+<<<<<<< HEAD
         print('running spatial localization on all spikes')
         for s, wd in tqdm.tqdm(zip(sort.spikes, sort.wavedata)):
+=======
+        print('Running spatial localization on all %d spikes' % nspikes)
+        for s, wd in zip(sort.spikes, sort.wavedata):
+>>>>>>> upstream/master
             # Get Vpp at each inclchan's tis, use as spatial weights:
             # see core.rowtake() or util.rowtake_cy() for indexing explanation:
+            sid = s['id']
+            # print out progress on a regular basis:
+            if sid % 10000 == 0:
+                printflush(sid, end='')
+            elif sid % 1000 == 0:
+                printflush('.', end='')
+            spiket = intround(s['t']) # nearest us
             nid = s['nid']
             chan = s['chan']
             nchans = s['nchans']
             chans = s['chans'][:nchans]
             neuronchans = sort.neurons[nid].wave.chans
             assert (chans == neuronchans).all()
-            s['tis'][:nchans] = ntis[nid] # wrt t0i=0
-            ## Note that aligni is a bit nonsensical, because KiloSort often doesn't actually
-            ## align to either peak:
-            s['aligni'] = nalignis[nid]
+            s['tis'][:nchans] = ntis[nid] # set according to its neuron, wrt t0i=0
+            s['aligni'] = nalignis[nid] # set according to its neuron
             maxchani = s['chani']
             t0i, t1i = int(s['tis'][maxchani, 0]), int(s['tis'][maxchani, 1])
             s['dt'] = abs(t1i - t0i) / sort.sampfreq * 1e6 # us
+            # note that V0 and V1 might not be of opposite sign, because tis are derived
+            # from mean neuron waveform, not from each individual spike:
             s['V0'], s['V1'] = AD2uV(wd[maxchani, t0i]), wd[maxchani, t1i] # uV
-            ## TODO: should probably assert here that V0 and V1 are of opposite sign:
             s['Vpp'] = abs(s['V1'] - s['V0']) # uV
             chanis = det.chans.searchsorted(chans)
-            w = np.float32(wd[np.arange(s['nchans'])[:, None], s['tis'][:nchans]])
-            w = abs(w).sum(axis=1)
+            w = np.float32(wd[np.arange(s['nchans'])[:, None], s['tis'][:nchans]]) # nchans x 2
+            w = abs(w).sum(axis=1) # Vpp for each chan, measured at t0i and t1i
             x = det.siteloc[chanis, 0] # 1D array (row)
             y = det.siteloc[chanis, 1]
             params = weights2f(f, w, x, y, maxchani)
             if params == None: # presumably a non-localizable many-channel noise event
+                #printflush('X', end='') # to indicate a rejected spikes
+                if DEBUG: det.log("Reject spike %d at t=%d based on fit params"
+                                  % (sid, spiket))
                 neuron = sort.neurons[nid]
-                sid = s['id']
+                # remove from its neuron, add to unsorted list of spikes:
                 sw.MoveSpikes2List(neuron, [sid], update=False)
-                # leave s['nlockchans'] = 0, don't display raster ticks for rejected spikes
-                treject = intround(s['t']) # nearest us
-                if DEBUG: det.log("reject spike %d at t=%d based on fit params"
-                                  % (sid, treject))
-                # to find out afterwards exactly which spikes were rejected, run:
-                # import numpy as np; np.where(self.sort.spikes['nlockchans'] == 0)[0]
-                # in the IPython shell. You can also inspect the initial contents of the
-                # unclustered spike list
+                # manually set localization params to Vpp-weighted spatial mean and 0 sigma:
+                x0, y0 = weights2spatialmean(w, x, y)
+                # set sigma to 0 um, and then later round lockr up to 1 um so that only one
+                # raster tick shows up for each rejected spike, reducing clutter
+                params = x0, y0, 0, 0
                 nreject += 1
-                continue # skip to next spike
             # Save spatial fit params, and "lockout" only the channels within lockrx*sx
-            # of the fit spatial location of the spike, up to a max of self.inclr.
+            # of the fit spatial location of the spike, up to a max of inclr. "Lockout"
+            # in this case only refers to which channels are highlighted with a raster tick
+            # for each spike:
             s['x0'], s['y0'], s['sx'], s['sy'] = params
             x0, y0 = s['x0'], s['y0']
             # lockout radius for this spike:
             lockr = min(det.lockrx*s['sx'], det.inclr) # in um
+            lockr = max(lockr, 1) # at least 1 um, so at least the maxchan gets a tick
             # test y coords of chans in y array, ylockchaniis can be used to index
             # into x, y and chans:
             ylockchaniis, = np.where(np.abs(y - y0) <= lockr) # convert bool arr to int
@@ -2831,24 +3128,40 @@ class SpykeWindow(QtGui.QMainWindow):
             lockchaniis = ylockchaniis.copy()
             
             for ylockchanii in ylockchaniis:
+<<<<<<< HEAD
                 if dist((x[ylockchanii], y[ylockchanii]), (x0, y0)) > lockr and len(lockchaniis)>ylockchanii:
                     lockchaniis = np.delete(lockchaniis, ylockchanii) # dist is too great
+=======
+                if dist((x[ylockchanii], y[ylockchanii]), (x0, y0)) > lockr:
+                    # Euclidean distance is too great, remove ylockchanii from lockchaniis:
+                    lockchaniis = lockchaniis[lockchaniis != ylockchanii]
+>>>>>>> upstream/master
             lockchans = chans[lockchaniis]
             nlockchans = len(lockchans)
             s['lockchans'][:nlockchans], s['nlockchans'] = lockchans, nlockchans
 
-        print('rejected %d/%d spikes, set as unclustered' % (nreject, nspikes))
+        print() # newline
+        preject = nreject / nspikes * 100
+        print('Rejected %d/%d spikes (%.1f %%), set as unclustered'
+              % (nreject, nspikes, preject))
 
         # remove any empty neurons due to all their spikes being rejected:
+        nneurons, nnreject = len(sort.neurons), 0
         for neuron in sort.neurons.values():
             if len(neuron.sids) == 0:
                 sw.RemoveNeuron(neuron, update=False)
+                nnreject += 1
+        preject = nnreject / nneurons * 100
+        print('Removed %d/%d (%.1f %%) empty neurons'
+              % (nnreject, nneurons, preject))
 
         self.UpdateClustersGUI()
 
         # update mean cluster positions, so they can be sorted by y0:
         for cluster in sort.clusters.values():
             cluster.update_pos()
+
+        print('Done importing events from %r' % fullfname)
 
     def convert_kilosortnpy2eventszip(self, path):
         """Read relevant KiloSort .npy results files in path, process them slightly,
@@ -2862,6 +3175,7 @@ class SpykeWindow(QtGui.QMainWindow):
         nidsfname = os.path.join(path, 'spike_clusters.npy')
         templatesfname = os.path.join(path, 'templates.npy')
         outputfname = os.path.join(path, s.fname + '.events.zip')
+        print('Converting KiloSort events to:\n%r' % outputfname)
 
         # load relevant KiloSort .npy results files:
         # spike times, sample point integers relative to start of .dat file:
@@ -2871,52 +3185,71 @@ class SpykeWindow(QtGui.QMainWindow):
         # reshape to ntemplates, nchans, nt by swapping axes (can't just assign new shape!):
         templates = np.swapaxes(templates, 1, 2)
         templates = np.ascontiguousarray(templates) # make C contiguous
+        ntemplates, nchans, nt = templates.shape
+        if nchans != s.nchans:
+            raise RuntimeError("Number of chans in 'templates.npy' (%d) doesn't match "
+                               "number of currently enabled chans in stream (%d)"
+                               % (nchans, s.nchans))
 
-        # calculate spike times, assume KiloSort was run on raw uninterpolated data:
-        spikets = s.t0 + spiketis / s.rawsampfreq * 1e6 # us
+        # calculate spike times to nearest int64 us, assume KiloSort was run on
+        # raw uninterpolated data:
+        spikets = intround(s.t0 + spiketis / s.rawsampfreq * 1e6) # us
+
+        # shift KiloSort spike times:
+        print('Shifting KiloSort spike times by %d us for better positioning in sort window'
+              % KILOSORTSHIFTCORRECT)
+        spikets = spikets + KILOSORTSHIFTCORRECT
 
         # find maxchan for each template: find max along time axis of each chan of each
         # template, then find argmax along chan axis of each template:
         templatemaxchanis = abs(templates).max(axis=2).argmax(axis=1) # one per template
         # get dereferenced maxchan IDs, for example, A1x32 probe has 1-based chans, at
-        # least when recorded with Blackrock NSP:
+        # least when recorded with Blackrock NSP. s.chans are *enabled* chans only:
         templatemaxchans = s.chans[templatemaxchanis] # one per template
         maxchans = templatemaxchans[nids] # one per spike
 
-        # ensure spike times are int64:
-        spikets = np.int64(spikets)
-
         # check limits, convert maxchans to uint8:
-        assert maxchans.max() < 2**8
-        assert maxchans.min() >= 0
+        assert maxchans.min() >= np.iinfo(np.uint8).min
+        assert maxchans.max() <= np.iinfo(np.uint8).max
         maxchans = np.uint8(maxchans) # save space, use same dtype as in SPIKEDTYPE
 
         # convert to 1-based neuron IDs, reserve 0 for unclustered spikes. Note that
-        # KiloSort's 0-based neuron IDs might have gaps, i.e., the don't necessarily span
+        # KiloSort's 0-based neuron IDs might have gaps, i.e., they don't necessarily span
         # the range 0..nneurons-1:
         nids += 1
         # check limits, convert nids to int16:
-        assert nids.max() < 2**15
-        assert nids.min() >= -2**15
+        assert nids.min() >= np.iinfo(np.int16).min
+        assert nids.max() <= np.iinfo(np.int16).max
         nids = np.int16(nids) # save space, use same dtype as in SPIKEDTYPE
 
         assert len(spikets) == len(maxchans) == len(nids)
-        print('converting KiloSort events to:\n%r' % outputfname)
         with open(outputfname, 'wb') as f:
             np.savez_compressed(f, spikets=spikets, maxchans=maxchans, nids=nids)
-        print('done converting KiloSort events')
+        print('Done converting KiloSort events')
 
     def OpenSortFile(self, fname):
-        """Open a Sort from a .sort and .spike file, try and open a .wave file
-        with the same name, restore the (closed) stream"""
+        """Open a Sort from a .sort and .spike and .wave file with the same base name,
+        restore the stream"""
         self.DeleteSort() # delete any existing Sort
+<<<<<<< HEAD
         print('opening sort file %r' % fname)
         f = open(join(self.sortpath, fname), 'rb')
         unpickler = cPickle.Unpickler(f)
         unpickler.find_global = core.unpickler_find_global_0_7_to_0_8
         sort = unpickler.load()
         print('sort file was %d bytes long' % f.tell())
+=======
+        print('Opening sort file %r' % fname)
+        t0 = time.time()
+        f = open(os.path.join(self.sortpath, fname), 'rb')
+        unpickler = pickle.Unpickler(f)
+        unpickler.find_global = core.unpickler_find_global
+        sort = unpickler.load()
+        print('Done opening sort file, took %.3f sec' % (time.time()-t0))
+        print('Sort file was %d bytes long' % f.tell())
+>>>>>>> upstream/master
         f.close()
+        sort.fname = fname # update in case file was renamed
         self.sort = sort
 
         # if a stream is already open, try rebinding it to the sort. If they don't match,
@@ -2932,7 +3265,14 @@ class SpykeWindow(QtGui.QMainWindow):
             self.uVperum = UVPERUM[ext]
             self.usperum = USPERUM[ext]
 
+        basefname = os.path.splitext(fname)[0]
+        # load .spike file of the same base name:
+        sort.spikefname = basefname + '.spike' # update in case of renamed basefname
         self.OpenSpikeFile(sort.spikefname)
+
+        # load .wave file of the same base name:
+        sort.wavefname = basefname + '.wave' # update in case of renamed basefname
+        sort.wavedata = self.OpenWaveFile(sort.wavefname)
 
         # try auto-updating sort to latest version:
         if float(sort.__version__) < float(__version__):
@@ -2956,9 +3296,18 @@ class SpykeWindow(QtGui.QMainWindow):
         self.restore_clustering_selections()
         self.RestoreClusters2GUI()
         self.updateTitle()
-        self.updateRecentFiles(join(self.sortpath, fname))
+        self.updateRecentFiles(os.path.join(self.sortpath, fname))
         self.update_gui_from_sort()
         self.EnableSortWidgets(True)
+
+    @property
+    def has_sort(self):
+        """Convenient way of checking if sort exists"""
+        try:
+            self.sort
+            return True
+        except AttributeError:
+            return False
 
     def restore_clustering_selections(self):
         """Restore state of last user-selected clustering parameters, specifically those
@@ -3001,36 +3350,54 @@ class SpykeWindow(QtGui.QMainWindow):
         except AttributeError: pass
 
     def OpenSpikeFile(self, fname):
+        """Open a .spike file, assign its contents to the spikes array, update dependencies"""
         sort = self.sort
+<<<<<<< HEAD
         print('loading spike file %r' % fname)
         f = open(join(self.sortpath, fname), 'rb')
         spikes = np.load(f)
         print('spike file was %d bytes long' % f.tell())
+=======
+        print('Loading spike file %r' % fname)
+        t0 = time.time()
+        f = open(os.path.join(self.sortpath, fname), 'rb')
+        spikes = np.load(f)
+        print('Done opening spike file, took %.3f sec' % (time.time()-t0))
+        print('Spike file was %d bytes long' % f.tell())
+>>>>>>> upstream/master
         f.close()
         sort.spikes = spikes
         # when loading a spike file, make sure the nid field is overwritten
-        # in the spikes array. The nids in sort.neurons are always the definitive ones
+        # in the spikes array. The nids in sort.neurons are always the definitive ones:
         for neuron in sort.neurons.values():
             spikes['nid'][neuron.sids] = neuron.id
         sort.update_usids()
-        # try loading .wave file of the same name
-        wavefname = os.path.splitext(fname)[0] + '.wave'
-        sort.wavedata = self.OpenWaveFile(wavefname)
 
     def OpenWaveFile(self, fname):
         """Open a .wave file and return wavedata array"""
         sort = self.sort
+<<<<<<< HEAD
         print('opening wave file %r' % fname)
         try: f = open(join(self.sortpath, fname), 'rb')
         except IOError:
             print("can't find file %r" % fname)
             return
+=======
+        print('Opening wave file %r' % fname)
+        t0 = time.time()
+        f = open(os.path.join(self.sortpath, fname), 'rb')
+>>>>>>> upstream/master
         try:
             del sort.wavedata
             #gc.collect() # ensure memory is freed up to prepare for new wavedata, necessary?
         except AttributeError: pass
         wavedata = np.load(f)
+<<<<<<< HEAD
         print('wave file was %d bytes long' % f.tell())
+=======
+        print('Done opening wave file, took %.3f sec' % (time.time()-t0))
+        print('Wave file was %d bytes long' % f.tell())
+>>>>>>> upstream/master
         f.close()
         if len(wavedata) != sort.nspikes:
             critical = QtGui.QMessageBox.critical
@@ -3059,15 +3426,24 @@ class SpykeWindow(QtGui.QMainWindow):
         except AttributeError: # corresponding .spike filename hasn't been generated yet
             s.spikefname = os.path.splitext(fname)[0] + '.spike'
         self.SaveSpikeFile(s.spikefname) # always (re)save .spike when saving .sort
+<<<<<<< HEAD
         print('saving sort file %r' % fname)
+=======
+        print('Saving sort file %r' % fname)
+        t0 = time.time()
+>>>>>>> upstream/master
         self.save_clustering_selections()
         self.save_window_states()
         s.fname = fname # bind it now that it's about to be saved
-        f = open(join(self.sortpath, fname), 'wb')
-        cPickle.dump(s, f, protocol=-1) # pickle with most efficient protocol
+        f = open(os.path.join(self.sortpath, fname), 'wb')
+        pickle.dump(s, f, protocol=-1) # pickle with most efficient protocol
         f.close()
+<<<<<<< HEAD
+=======
+        print('Done saving sort file, took %.3f sec' % (time.time()-t0))
+>>>>>>> upstream/master
         self.updateTitle()
-        self.updateRecentFiles(join(self.sortpath, fname))
+        self.updateRecentFiles(os.path.join(self.sortpath, fname))
 
     def save_clustering_selections(self):
         """Save state of last user-selected clustering parameters. Unlike parameters such as
@@ -3113,10 +3489,19 @@ class SpykeWindow(QtGui.QMainWindow):
         if len(self.dirtysids) > 0:
             self.SaveWaveFile(s.wavefname, sids=self.dirtysids)
             self.dirtysids.clear() # no longer dirty
+<<<<<<< HEAD
         print('saving spike file %r' % fname)
         f = open(join(self.sortpath, fname), 'wb')
         np.save(f, s.spikes)
         f.close()
+=======
+        print('Saving spike file %r' % fname)
+        t0 = time.time()
+        f = open(os.path.join(self.sortpath, fname), 'wb')
+        np.save(f, s.spikes)
+        f.close()
+        print('Done saving spike file, took %.3f sec' % (time.time()-t0))
+>>>>>>> upstream/master
         s.spikefname = fname # used to indicate that the spikes have been saved
 
     def SaveWaveFile(self, fname, sids=None):
@@ -3127,17 +3512,29 @@ class SpykeWindow(QtGui.QMainWindow):
         except AttributeError: return # no wavedata to save
         if not os.path.splitext(fname)[1]: # if it doesn't have an extension
             fname = fname + '.wave'
+<<<<<<< HEAD
         print('saving wave file %r' % fname)
         if sids != None and len(sids) >= NDIRTYSIDSTHRESH:
+=======
+        print('Saving wave file %r' % fname)
+        t0 = time.time()
+        if sids is not None and len(sids) >= NDIRTYSIDSTHRESH:
+>>>>>>> upstream/master
             sids = None # resave all of them for speed
         if sids is None: # write the whole file
-            print('updating all %d spikes in wave file %r' % (s.nspikes, fname))
-            f = open(join(self.sortpath, fname), 'wb')
+            print('Updating all %d spikes in wave file %r' % (s.nspikes, fname))
+            f = open(os.path.join(self.sortpath, fname), 'wb')
             np.save(f, s.wavedata)
             f.close()
         else: # write only sids
+<<<<<<< HEAD
             print('updating %d spikes in wave file %r' % (len(sids), fname))
             core.updatenpyfilerows(join(self.sortpath, fname), sids, s.wavedata)
+=======
+            print('Updating %d spikes in wave file %r' % (len(sids), fname))
+            core.updatenpyfilerows(os.path.join(self.sortpath, fname), sids, s.wavedata)
+        print('Done saving wave file, took %.3f sec' % (time.time()-t0))
+>>>>>>> upstream/master
         s.wavefname = fname
 
     def DeleteSort(self):
@@ -3145,7 +3542,7 @@ class SpykeWindow(QtGui.QMainWindow):
         try:
             # TODO: if Save button is enabled, check if Sort is saved,
             # if not, prompt to save
-            #print('deleting existing Sort and entries in list controls')
+            #print('Deleting existing Sort and entries in list controls')
             #self.sort.spikes.resize(0, recheck=False) # doesn't work, doesn't own memory
             del self.sort
         except AttributeError:
@@ -3176,88 +3573,42 @@ class SpykeWindow(QtGui.QMainWindow):
         gc.collect()
 
     def get_chans_enabled(self):
-        """Return sorted array of enabled chans"""
-        chans = sorted(self._chans_enabled) # get the keys
-        enables = [ self._chans_enabled[chan] for chan in chans ] # get the boolean values
-        return np.asarray([ chan for (chan, enable) in zip(chans, enables) if enable ])
+        return self.hpstream.chans
 
-    def set_chans_enabled(self, chans, enable=None):
-        """Updates which chans are enabled in ._chans_enabled dict and in the
-        plot panels, and in the highpass stream. If enable is set, chans specifies
-        which chans should have their enable flag overwritten. Otherwise,
-        chans specifies all the chans we want enabled.
-        The code for the 2nd case is quite elaborate, such that the visibility
-        state of any given plot in all plotpanels isn't needlessly toggled,
-        which slows things down and causes flicker, I think"""
+    def set_chans_enabled(self, chans):
+        """Updates chans in the streams and plot panels"""
+        # update streams:
+        self.hpstream.chans = chans
+        if self.lpstream.ext == '.srf': # a Surf-like lpstream with a .layout attrib
+            # take intersection of lpstream.layout.chans and chans,
+            # conserving ordering in lpstream.layout.chans
+            self.lpstream.chans = np.asarray([ chan for chan in self.lpstream.layout.chans if
+                                               chan in chans ])
+        else: # treat it the same as an hpstream
+            self.lpstream.chans = chans
 
-        # inits and checks
-        try:
-            allchans = self.hpstream.chans # not sure if this needs to be copy()'d or not
-        except AttributeError: # no hpstream yet
-            allchans = []
-        if chans is None: # None means all chans
-            chans = allchans
-        chans = toiter(chans) # need not be contiguous
-        try:
-            self._chans_enabled
-        except AttributeError:
-            self._chans_enabled = {} #dict(zip(allchans, [ True for chan in allchans ]))
-
-        # overwrite enable flag of chans...
-        if enable != None:
-            for chan in chans:
-                self._chans_enabled[chan] = enable
-        # ...or, leave only chans enabled
-        else:
-            enabledchans = [ chan for (chan, enabled) in self._chans_enabled.iteritems()
-                             if enabled==True ]
-            disabledchans = [ chan for (chan, enabled) in self._chans_enabled.iteritems()
-                              if enabled==False ]
-            notchans = set(allchans).difference(chans) # chans we don't want enabled
-            # find difference between currently enabled chans and the chans to enable:
-            chans2disable = set(enabledchans).difference(chans)
-            # find difference between currently disabled chans and the chans to disable:
-            chans2enable = set(disabledchans).difference(notchans)
-            for chan in chans2enable:
-                self._chans_enabled[chan] = True
-            for chan in chans2disable:
-                self._chans_enabled[chan] = False
-
-        # now set chans in plotpanels to reset colours:
+        # set chans in plotpanels to reset colours:
         for wintype in WINDOWUPDATEORDER:
             try:
-                self.windows[wintype].panel.set_chans(self.chans_enabled)
+                self.windows[wintype].panel.set_chans(chans)
             except KeyError: # wintype hasn't been opened yet
                 pass
-
-        # update stream(s):
-        if self.hpstream != None:
-            self.hpstream.chans = self.chans_enabled
-        if self.lpstream != None:
-            try: # is it a Surf-like lpstream with a .layout attrib?
-                # take intersection of lpstream.layout.chans and chans_enabled,
-                # conserving ordering in lpstream.layout.chans
-                self.lpstream.chans = [ chan for chan in self.lpstream.layout.chans if
-                                        chan in self.chans_enabled ]
-            except AttributeError: # treat it the same as an hpstream
-                self.lpstream.chans = self.chans_enabled
-
         self.plot() # replot
 
     chans_enabled = property(get_chans_enabled, set_chans_enabled)
 
     def CloseStream(self):
-        """Close data windows and stream (both hpstream and lpstream)"""
+        """Close data windows and stream (both hpstream and lpstream).
+        Caller should first check if there are any streams to close"""
         # need to specifically get a list of keys, not an iterator,
         # since self.windows dict changes size during iteration
-        for wintype in self.windows.keys():
+        for wintype in list(self.windows): # get keys as list before modifying dict
             if wintype in ['Spike', 'Chart', 'LFP']:
                 self.CloseWindow(wintype) # deletes from dict
         for stream in [self.hpstream, self.lpstream]:
             if stream: stream.close()
         self.hpstream = None
         self.lpstream = None
-        self.chans_enabled = []
         self.t = None
         self.ShowRasters(False) # reset
         self.updateTitle()
@@ -3304,9 +3655,9 @@ class SpykeWindow(QtGui.QMainWindow):
                 #print('sort x: %d' % x)
                 window = SortWindow(parent=self, pos=(x, y))
             elif wintype == 'Cluster':
-                x = self.pos().x() + self.size().width() + self.windows['Sort'].size().width() + 4*BORDER
+                x = (self.pos().x() + self.size().width()
+                     + self.windows['Sort'].size().width() + 4*BORDER)
                 y = self.pos().y()
-                from cluster import ClusterWindow # can't delay this any longer
                 size = (SCREENWIDTH - x - 2*BORDER, CLUSTERWINDOWHEIGHT)
                 #print('cluster x: %d' % x)
                 #print('cluster size: %r' % (size,))
@@ -3320,7 +3671,7 @@ class SpykeWindow(QtGui.QMainWindow):
             try: # try and load saved window geometry and state from sort
                 window.restoreGeometry(self.sort.windowGeometries[wintype])
                 window.restoreState(self.sort.windowStates[wintype])
-            except(AttributeError, KeyError):
+            except (AttributeError, KeyError):
                 pass
         self.ShowWindow(wintype) # just show it
         if new: # do stuff that only works after first show
@@ -3371,7 +3722,7 @@ class SpykeWindow(QtGui.QMainWindow):
     def ShowRasters(self, enable=True):
         """Show/hide rasters for all applicable windows. Force menu states to correspond"""
         self.ui.actionRasters.setChecked(enable)
-        for wintype, window in self.windows.iteritems():
+        for wintype, window in self.windows.items():
             if wintype in ['Spike', 'Chart', 'LFP']:
                 window.panel.show_rasters(enable=enable)
                 self.plot(wintype)
@@ -3407,7 +3758,7 @@ class SpykeWindow(QtGui.QMainWindow):
         """Set highpass stream sampling frequency, update widgets"""
         if self.hpstream != None:
             self.hpstream.sampfreq = sampfreq
-            # since slider is in multiples of SLIDERTRES, doesn't need to be updated
+            self.update_slider() # update slider to account for new tres
             self.plot()
         self.ui.__dict__['action%dkHz' % (sampfreq / 1000)].setChecked(True)
 
@@ -3556,7 +3907,8 @@ class SpykeWindow(QtGui.QMainWindow):
         ui = self.ui
         s = self.sort
         det = s.detector
-        self.chans_enabled = det.chans
+        if self.hpstream:
+            self.chans_enabled = det.chans
         # update detector pane
         meth2widget = {'GlobalFixed': ui.globalFixedRadioButton,
                        'ChanFixed': ui.channelFixedRadioButton,
@@ -3598,7 +3950,7 @@ class SpykeWindow(QtGui.QMainWindow):
     def get_nearest_timepoint(self, t):
         """Round t to nearest (possibly interpolated) sample timepoint"""
         t = intround(t / self.hpstream.tres) * self.hpstream.tres
-        t = min(max(t, self.range[0]), self.range[1]) # constrain to within .range
+        t = min(max(t, self.trange[0]), self.trange[1]) # constrain to within self.trange
         return t
 
     def seek(self, t=0):
@@ -3613,9 +3965,8 @@ class SpykeWindow(QtGui.QMainWindow):
         # only plot if t has actually changed, though this doesn't seem to improve
         # performance, maybe mpl is already doing something like this?
         if self.t != oldt: # update controls first so they don't lag
-            self.ui.filePosLineEdit.setText(str(self.t))
-            if self.t % SLIDERTRES == 0: # only update slider if at a SLIDERTRES tick
-                self.ui.slider.setValue(self.t // SLIDERTRES)
+            self.ui.filePosLineEdit.setText('%.1f' % self.t)
+            self.ui.slider.setValue(intround(self.t / self.hpstream.tres))
             self.plot()
     
     def step(self, direction):

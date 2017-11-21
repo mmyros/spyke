@@ -6,14 +6,17 @@ from __future__ import with_statement
 
 __authors__ = ['Martin Spacek', 'Reza Lotun']
 
+import sys
+import os
 import hashlib
 import time
 import datetime
-import os
+from collections import OrderedDict as odict
 
 import random
 import string
 from copy import copy
+import json
 
 from PyQt4 import QtCore, QtGui
 from PyQt4.QtCore import Qt
@@ -21,26 +24,23 @@ getSaveFileName = QtGui.QFileDialog.getSaveFileName
 
 import numpy as np
 from numpy import pi
-import scipy.signal
+import scipy.signal, scipy.io
 
 import matplotlib as mpl
 
-# set some numpy options - these should hold for all modules in spyke
+# set some numpy options - these hold for all modules in spyke:
 np.set_printoptions(precision=3)
 np.set_printoptions(threshold=1000)
 np.set_printoptions(edgeitems=5)
 np.set_printoptions(linewidth=150)
 np.set_printoptions(suppress=True)
-# make overflow, underflow, div by zero, and invalid all raise errors
-# this really should be the default in numpy...
-np.seterr(all='raise')
+# make overflow, div by zero, and invalid raise errors, and underflow just raise a warning,
+# so that program doesn't halt on underflow during gaussian fit in extract module:
+np.seterr(over='raise', divide='raise', invalid='raise', under='warn')
 
 UNIXEPOCH = datetime.datetime(1970, 1, 1, 0, 0, 0) # UNIX epoch: Jan 1, 1970
 
-NULL = '\x00'
-
-MU = '\xb5' # greek mu symbol
-MICRO = 'u'
+NULL = b'\x00'
 
 DEFDATFILTMETH = 'BW' # default .dat filter method: None, 'BW', 'WMLDR'
 DEFNSXFILTMETH = 'BW' # default .nsx filter method: None, 'BW', 'WMLDR'
@@ -48,8 +48,9 @@ BWHPF0 = 300 # butterworth high-pass filter low-frequency cutoff, Hz
 BWLPF1 = 300 # butterworth low-pass filter high-frequency cutoff, Hz
 BWHPORDER = 4 # butterworth high-pass filter order
 BWLPORDER = 4 # butterworth low-pass filter order
-# don't filter raw data, only decimate to get low pass? simple, but aliases
-LOWPASSFILTER = False
+# low-pass filter raw data to get low-pass stream?
+# otherwise just decimate, which is simpler and faster, but aliases:
+LOWPASSFILTERLPSTREAM = True
 
 DEFCAR = 'Median' # default common average reference method: None, 'Median', 'Mean';
                   # 'Median' works best because it's least affected by spikes
@@ -59,6 +60,8 @@ DEFLPSAMPLFREQ = 1000 # default lowpass sampling rate for wide-band stream types
 DEFHPDATSHCORRECT = False ## TODO: this may not hold for open-ephys and Intan chips!
 DEFHPNSXSHCORRECT = False # no need for .nsx files, s+h delay is only 1 ns between chans
 DEFHPSRFSHCORRECT = True
+
+SRFNCHANSPERBOARD = 32 # used for s+h delay correction in .srf files
 
 # Apparently KERNELSIZE == number of kernel zero crossings, but that seems to depend on
 # the phase of the kernel, some have one less, depending on the channel (when doing sample
@@ -73,7 +76,6 @@ assert KERNELSIZE % 2 == 0
 # number of excess raw datapoints to include on either side of each wideband Stream
 # (such as a DATStream or NSXStream) during a slice call. Due to the lack of analog filtering,
 # a greater excess is needed than e.g. SurfStream because it's already analog filtered
-SRFNCHANSPERBOARD = 32 # TODO: would be better to not hard-code this
 XSWIDEBANDPOINTS = 200
 
 MAXLONGLONG = 2**63-1
@@ -185,34 +187,20 @@ class WaveForm(object):
                 else:
                     std = self.std[:, lo:hi]
                 ts = self.ts[lo:hi]
-                '''
-                if np.asarray(data == self.data).all() and np.asarray(ts == self.ts).all():
-                    # no need for a new WaveForm, though new WaveForms aren't expensive,
-                    # only new data are
-                    return self
-                '''
                 # return a new WaveForm:
                 return WaveForm(data=data, std=std, ts=ts, chans=self.chans)
         else: # index into self by channel id(s)
             keys = toiter(key)
-            #try: assert (self.chans == np.sort(self.chans)).all() # testing code
-            #except AssertionError: import pdb; pdb.set_trace() # testing code
+            # don't assume self.chans are sorted:
             try:
-                assert set(keys).issubset(self.chans), ("requested channels outside of "
-                                                        "channels in waveform")
-                # this is fine:
-                #assert len(set(keys)) == len(keys), "same channel specified more than once"
-            except AssertionError:
+                chanis = argmatch(self.chans, keys)
+            except ValueError:
                 raise IndexError('invalid index %r' % key)
-            #i = self.chans.searchsorted(keys) # indices into rows of data
-            # best not to assume that chans are sorted, often the case in LFP data;
-            # i are indices into rows of data:
-            i = [ int(np.where(chan == self.chans)[0]) for chan in keys ]
-            data = self.data[i] # grab the appropriate rows of data
+            data = self.data[chanis] # grab the appropriate rows of data
             if self.std is None:
                 std = None
             else:
-                std = self.std[i]
+                std = self.std[chanis]
             return WaveForm(data=data, std=std, ts=self.ts, chans=keys) # return a new WaveForm
 
     def __len__(self):
@@ -340,7 +328,7 @@ class SpykeToolWindow(QtGui.QMainWindow):
                 QtGui.QMessageBox.critical(
                     self.panel, "Error saving file", str(e),
                     QtGui.QMessageBox.Ok, QtGui.QMessageBox.NoButton)
-            print('panel saved to %r' % fname)
+            print('Panel saved to %r' % fname)
 
 
 class SpykeListView(QtGui.QListView):
@@ -376,7 +364,8 @@ class SpykeListView(QtGui.QListView):
         modifiers = event.modifiers()
         ctrldown = bool(modifiers & Qt.ControlModifier)
         ctrlup = not ctrldown
-        if (key in [Qt.Key_A, Qt.Key_M, Qt.Key_G, Qt.Key_Equal, Qt.Key_Minus, Qt.Key_Slash,
+        if (key in [Qt.Key_A, Qt.Key_N, Qt.Key_M, Qt.Key_G,
+                    Qt.Key_Equal, Qt.Key_Minus, Qt.Key_Slash,
                     Qt.Key_P, Qt.Key_Backslash, Qt.Key_NumberSign, Qt.Key_F, Qt.Key_R,
                     Qt.Key_E, Qt.Key_B, Qt.Key_BracketLeft, Qt.Key_BracketRight,
                     Qt.Key_Comma, Qt.Key_Period, Qt.Key_C, Qt.Key_T, Qt.Key_W]
@@ -421,7 +410,7 @@ class SpykeListView(QtGui.QListView):
                 # if we can't add all the requested spikes to the sort panel without
                 # exceeding MAXNSPIKEPLOTS, then randomly sample however many we can still
                 # add (maxnadd), and add them to the sort panel
-                print('adding %d randomly sampled plots of %d selected spikes'
+                print('Adding %d randomly sampled plots of %d selected spikes'
                       % (maxnadd, self.nrowsSelected))
                 addis = random.sample(addis, maxnadd)
                 panel.maxed_out = True
@@ -509,7 +498,7 @@ class SpykeListView(QtGui.QListView):
         stop = min(self.nrows, stop)
         nrows = stop - start
         nsamples = min(nsamples, nrows)
-        rows = random.sample(xrange(start, stop), nsamples)
+        rows = random.sample(range(start, stop), nsamples)
         self.selectRows(rows, scrollTo=False)
 
 
@@ -848,7 +837,7 @@ class NListDelegate(QtGui.QStyledItemDelegate):
                 painter.setPen(self.unselectedgoodpen)
             else: # use default background pen
                 painter.setPen(self.unselectedpen)
-        text = value.toString()
+        text = qvar2str(value)
         painter.drawText(option.rect, Qt.AlignCenter, text)
         painter.restore()
 
@@ -995,6 +984,13 @@ def toiter(x):
     else:
         return [x]
 
+def tolist(x):
+    """Convert to list if not already a list"""
+    try:
+        return list(x)
+    except TypeError: # x is not iterable
+        return [x]
+
 def tocontig(x):
     """Return C contiguous copy of array x if it isn't C contiguous already"""
     if not x.flags.c_contiguous:
@@ -1051,6 +1047,39 @@ def argcut(ts, trange):
     '''
     return lo, hi
 
+def argmatch(a, v):
+    """
+    Find indices into `a` where elements in `v` match those in `a`.
+
+    Find the indices into an array `a` whose values match those queried in `v`.
+    Both arrays are first flattened to 1D, and the values in `a` must be unique.
+    This is an accelerated equivalent of:
+
+    `np.array([ int(np.where(a == val)[0]) for val in v ])`
+
+    Parameters
+    ----------
+    a : 1-D array_like
+        Input array.
+    v : array_like
+        Values to match against `a`.
+
+    Returns
+    -------
+    indices : array of ints
+        Array of indices into `a` with the same shape as `v`.
+
+    Adapted from http://stackoverflow.com/a/8251668
+    See numpy GH PR: https://github.com/numpy/numpy/pull/9055
+    """
+    a, v = np.ravel(a), np.ravel(v)
+    if len(a) != len(np.unique(a)):
+        raise ValueError("values in `a` must be unique for unambiguous results")
+    if not np.in1d(v, a).all():
+        raise ValueError("values array %s is not a subset of input array %s" % (v, a))
+    asortis = a.argsort()
+    return asortis[a.searchsorted(v, sorter=asortis)]
+
 def dist(a, b):
     """Return the Euclidean distance between two N-dimensional coordinates"""
     a = np.asarray(a)
@@ -1068,7 +1097,7 @@ def eucd(coords):
     coords = np.asarray(coords)
     n, m = coords.shape
     delta = np.zeros((n, n), dtype=np.float64)
-    for d in xrange(m):
+    for d in range(m):
         data = coords[:, d]
         delta += (data - data[:, np.newaxis]) ** 2
     return np.sqrt(delta)
@@ -1325,7 +1354,8 @@ def td2usec(td):
 def td2fusec(td):
     """Convert datetime.timedelta to float microseconds"""
     sec = td.total_seconds() # float
-    return sec * 1000000
+    usec = sec * 1000000
+    return usec
 
 def td2days(td):
     """Convert datetime.timedelta to days"""
@@ -1411,6 +1441,15 @@ def rmserror(a, b, axis=None):
     """Return root-mean-squared error between arrays a and b"""
     return rms(a - b, axis=axis)
 
+def printflush(*args, **kwargs):
+    """Print args and flush to stdout immediately, so that
+    python need not be started in unbuffered mode, or PYTHONUNBUFFERED env need
+    not be set. Adapted from https://stackoverflow.com/a/27991478"""
+    file = sys.stdout
+    kwargs['file'] = file
+    print(*args, **kwargs)
+    file.flush()
+
 def lstrip(s, strip):
     """What I think str.lstrip should really do"""
     if s.startswith(strip):
@@ -1435,8 +1474,11 @@ def lrstrip(s, lstr, rstr):
 
 def isascii(c):
     """Check if character c is a printable character, TAB, LF, or CR"""
-    d = ord(c) # decimal representation
-    return 32 <= d <= 127 or d in [9, 10, 13]
+    try:
+        c = ord(c) # convert string character to decimal representation
+    except TypeError: # it's already an int? (Py3)
+        pass
+    return 32 <= c <= 127 or c in [9, 10, 13]
 
 def rstripnonascii(s):
     """Return a new string with all characters after the first non-ASCII character
@@ -1444,6 +1486,14 @@ def rstripnonascii(s):
     for i, c in enumerate(s):
         if not isascii(c):
             return s[:i]
+    return s
+
+def matlabize(s):
+    """Make string s suitable for use as a MATLAB function/script name"""
+    s = s.replace(' ', '_')
+    s = s.replace('.', '_')
+    s = s.replace('-', '_')
+    assert len(s) <= 63 # MATLAB function/script name length limitation
     return s
 
 def pad(x, align=8):
@@ -1686,7 +1736,7 @@ def filter(data, sampfreq=1000, f0=0, f1=7, fr=0.5, gpass=0.01, gstop=30, ftype=
     return data, b, a
 
 def filterord(data, sampfreq=1000, f0=300, f1=None, order=4, rp=None, rs=None,
-              btype='highpass', ftype='butter'):
+              btype='highpass', ftype='butter', causal=True):
     """Bandpass filter data by specifying filter order and btype, instead of gpass and gstop.
 
     btype: 'lowpass', 'highpass', 'bandpass', 'bandstop'
@@ -1708,7 +1758,10 @@ def filterord(data, sampfreq=1000, f0=300, f1=None, order=4, rp=None, rs=None,
     wn = fn / (sampfreq / 2) # wn can be either a scalar or a length 2 vector
     b, a = scipy.signal.iirfilter(order, wn, rp=rp, rs=rs, btype=btype, analog=0,
                                   ftype=ftype, output='ba')
-    data = scipy.signal.lfilter(b, a, data)
+    if causal:
+        data = scipy.signal.lfilter(b, a, data) # causal, adds freq-dependent phase lag
+    else:
+        data = scipy.signal.filtfilt(b, a, data) # non-causal, 0 phase lag
     return data, b, a
 
 def WMLDR(data, wname="db4", maxlevel=5, mode='sym'):
@@ -1804,6 +1857,25 @@ def WMLDR_real(data, wname="db4", maxlevel=5, mode='sym'):
     
     return data
 
+def envelope_hilbert(x):
+    """Return envelope of signal x by taking abs of hilbert transform of x. Note this
+    only really works for narrow-band signals. Otherwise, the output envelope is almost
+    as noisy as the input.
+    See:
+    https://dsp.stackexchange.com/a/3464
+    https://docs.scipy.org/doc/scipy-0.19.0/reference/generated/scipy.signal.hilbert.html
+    """
+    return np.abs(scipy.signal.hilbert(x))
+
+def envelope_filt(x, sampfreq=None, f0=None, f1=BWLPF1, order=BWLPORDER, ftype='butter'):
+    """Calculate envelope of x by rectifying and then low-pass filtering. Return float64"""
+    assert sampfreq is not None
+    x = np.abs(x)
+    x, b, a = filterord(x, sampfreq=sampfreq, f0=f0, f1=f1,
+                        order=order, rp=None, rs=None,
+                        btype='lowpass', ftype=ftype) # float64
+    return x
+
 def updatenpyfilerows(fname, rows, arr):
     """Given a numpy formatted binary file (usually with .npy extension,
     but not necessarily), update 0-based rows (first dimension) of the
@@ -1828,21 +1900,146 @@ def updatenpyfilerows(fname, rows, arr):
         f.write(arr[row])
     f.close()
 
-def unpickler_find_global_0_7_to_0_8(oldmod, oldcls):
-    """Required for unpickling .sort version 0.7 files and upgrading them to version 0.8.
-    Rename class names that changed between the two versions. Unfortunately, you can't check
-    the .sort version number until after unpickling, so this has to be done for all .sort
-    files during unpickling - it can't be done after unpickling"""
-    old2new_streammod = {'core': 'stream'}
-    old2new_streamcls = {'Stream': 'SurfStream',
-                         'SimpleStream': 'SimpleStream',
-                         'TrackStream': 'MultiStream'}
+def unpickler_find_global(oldmod, oldcls):
+    """Required for unpickling some .sort files and upgrading them to the next version.
+    Rename class and module names that changed between two .sort versions. Unfortunately,
+    we can't check the .sort version number until after unpickling, so this has to be done
+    for *all* .sort files during unpickling, not after"""
+    oldmod2newmod = {'core': 'stream'} # version 0.7 to 0.8
+    oldcls2newcls = {'Stream': 'SurfStream', # 0.7 to 0.8
+                     'SimpleStream': 'SimpleStream', # 0.7 to 0.8
+                     'TrackStream': 'MultiStream', # 0.7 to 0.8
+                     'A1x64_Poly2_6mm_23s_160': 'A1x64'} # 1.2 to 1.3
     try:
-        newmod = old2new_streammod[oldmod]
-        newcls = old2new_streamcls[oldcls]
-    except KeyError: # no old to new conversion
+        newcls = oldcls2newcls[oldcls]
+    except KeyError: # no old to new class conversion
         exec('import %s' % oldmod)
         return eval('%s.%s' % (oldmod, oldcls))
+    newmod = oldmod2newmod.get(oldmod, oldmod)
     print('Rename on unpickle: %s.%s -> %s.%s' % (oldmod, oldcls, newmod, newcls))
     exec('import %s' % newmod)
     return eval('%s.%s' % (newmod, newcls))
+
+def write_dat_json(stream, fulljsonfname, sampfreq=None, chans=None, auxchans=None,
+                   chan_order=None, envelope=None, adaptername=None):
+    """Write .json metadata file as a companion to stream's file. For now, stream should be
+    either a DATStream, NSXStream, or SurfStream"""
+    ext = stream.ext
+    assert ext in ['.dat', '.ns6', '.srf']
+    if stream.is_multi(): # it's a MultiStream
+        source_fnames = stream.fnames
+        stream = stream.streams[0] # use its first stream to get field values
+    else: # it's a single Stream
+        source_fnames = [stream.fname]
+    fh = stream.f.fileheader
+
+    # choose values:
+    if sampfreq is None:
+        sampfreq = stream.sampfreq
+    sample_rate = sampfreq
+    if chans is None:
+        chans = list(stream.chans)
+    if auxchans is None:
+        auxchans = []
+    nchans = len(chans) + len(auxchans)
+    uV_per_AD = stream.converter.AD2uV(1)
+    # multiply by sampfreq instead of dividing by stream.tres, because passed sampfreq
+    # might differ from that of stream:
+    nsamples_offset = intround(stream.t0 / 1e6 * sampfreq)
+    datetime = stream.datetime.isoformat()
+    if ext == '.dat':
+        author = fh.author
+        version = fh.version
+        notes = fh.notes
+    elif ext == '.ns6':
+        author = 'Blackrock NSP'
+        version = ''
+        notes = fh.comment
+    elif ext == '.srf':
+        author = fh.user_name
+        version = fh.app_info
+        notes = ''
+    else:
+        raise ValueError
+    filtering = stream.filtering
+    common_avg_ref = stream.car
+
+    # write to odict:
+    od = odict()
+    od['nchans'] = nchans
+    od['sample_rate'] = sample_rate
+    if ext == '.srf':
+        od['shcorrect'] = stream.shcorrect
+    od['dtype'] = 'int16' # hard-coded, only dtype supported for now
+    od['uV_per_AD'] = uV_per_AD
+    od['probe_name'] = stream.probe.name
+    od['adapter_name'] = adaptername
+    od['chans'] = chans
+    od['chan_order'] = chan_order # for human reference only, 'depth' & None are obvious values
+    od['aux_chans'] = auxchans
+    od['nsamples_offset'] = nsamples_offset
+    od['datetime'] = datetime
+    od['author'] = author
+    od['version'] = version
+    od['notes'] = notes
+
+    od['source_fnames'] = source_fnames
+    od['filtering'] = filtering
+    od['common_avg_ref'] = common_avg_ref
+    if envelope:
+        od['envelope'] = envelope
+
+    with open(fulljsonfname, 'w') as jsonf:
+        ## TODO: make list fields not have a newline for each entry. Not at all easy to do.
+        ## See https://stackoverflow.com/questions/16405969/how-to-change-json-encoding-behaviour-for-serializable-python-object
+        # write contents of odict to file:
+        json.dump(od, jsonf, indent=0, separators=(',', ': '))
+        jsonf.write('\n') # end with a blank line
+    print('Wrote metadata file %r' % fulljsonfname)
+
+def write_ks_chanmap_mat(stream, fname):
+    """Write stream's channel map information to .mat file for use by KiloSort"""
+    nchans = stream.nchans # number of enabled chans
+    # mask to tell ks which chans in .dat to use for sorting?:
+    connected = np.tile(True, (nchans, 1)) # column vector
+    chans = stream.chans # array of enabled chans
+    # row vector, 1-based indices into coords, in order of data in .dat
+    chanMap = np.arange(1, nchans+1)
+    chanMap0ind = chanMap - 1 # 0-based version of chanMap
+    # get coords of only the enabled chans, will be indexed into by chanMap in MATLAB:
+    coords = np.asarray([ stream.probe.SiteLoc[chan] for chan in chans ])
+    xcoords = coords[:, 0].reshape(-1, 1) # column vector
+    ycoords = coords[:, 1].reshape(-1, 1) # column vector, origin is at top of probe
+    ycoords = ycoords.max() - ycoords # ks expects origin at bottom of probe
+    kcoords = np.tile(1, (nchans, 1)) # column vector, something to do with shanks?
+    fs = stream.rawsampfreq
+    """
+    Export to .mat file with exactly the same dtypes (doubles) that KiloSort's chanmap
+    creation script (see .m files in templates/ks) does. Note that this saves to a MATLAB 5
+    (to version 7.2) .mat file, while by default contemporary MATLAB saves to the newer HDF5
+    version, which is unsupported by scipy.io. Both seem to load identically in MATLAB 2015a,
+    so it shouldn't matter:
+    """
+    matd = {'connected': connected, # leave as boolean
+            'chanMap': np.float64(chanMap),
+            'chanMap0ind': np.float64(chanMap0ind),
+            'xcoords': np.float64(xcoords),
+            'ycoords': np.float64(ycoords),
+            'kcoords': np.float64(kcoords),
+            'fs': np.float64(fs)}
+    scipy.io.savemat(fname, matd)
+    print('Wrote KiloSort chanmap file %r' % fname)
+
+def qvar2list(qvar):
+    """Deal with Qt4 QVariant in Python 2 vs 3"""
+    try:
+        return qvar.toList() # Py2
+    except AttributeError:
+        return qvar # Py3
+
+def qvar2str(qvar):
+    """Deal with Qt4 QVariant in Python 2 vs 3"""
+    try:
+        return str(qvar.toString()) # Py2
+    except AttributeError:
+        return qvar # Py3

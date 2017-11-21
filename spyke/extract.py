@@ -10,15 +10,14 @@ import multiprocessing as mp
 ps = mp.current_process
 
 import numpy as np
-np.seterr(under='warn') # don't halt on underflow during gaussian_fit
 from scipy.optimize import leastsq
 from scipy.interpolate import UnivariateSpline
-#import pywt
+import pywt
 import scipy.stats
 
 import pylab as pl
 
-from core import g, g2, cauchy2
+from .core import g, g2, cauchy2
 
 
 DEFSX = 50 # default spatial decay along x axis, in um
@@ -316,7 +315,7 @@ class Extractor(object):
         ICs = np.matrix(np.load('ptc15.87.2000_waveform_ICs.npy'))
         invICs = ICs.I # not a square matrix, think it must do pseudoinverse
 
-        for sid in xrange(nspikes):
+        for sid in range(nspikes):
             maxchanwavedata = wavedata[maxchani]
             ## TODO: maybe normalize amplitude of spike to match that of the ICs (maybe keep
             ## everything normalized to 1). That way, You're really just looking at spike
@@ -606,7 +605,7 @@ class Extractor(object):
             pool = mp.Pool(ncpus, initializer, (self, det)) # send pickled copies to processes
             args = zip(spikeslist, wavedata)
             results = pool.map(callspike2XY, args) # using chunksize=1 is a bit slower
-            print('done with pool.map()')
+            print('Done with pool.map()')
             pool.close()
             # results is a list of (x0, y0, sx, sy) tuples, and needs to be unzipped
             spikes['x0'], spikes['y0'], spikes['sx'], spikes['sy'] = zip(*results)
@@ -717,7 +716,13 @@ class Extractor(object):
         # convert to float before normalization, take abs of all weights
         # taking abs doesn't seem to affect clusterability
         w = np.abs(w)
-        w /= w.sum() # normalized
+        wsum = w.sum()
+        if wsum == 0.0: # weights are all 0, maybe due to zero'd data gaps between recordings
+            print("WARNING: all the weights for this spike are 0, returning the straight "
+                  "spatial mean (%g, %g) of its channels instead of a weighted mean"
+                  % (x.mean(), y.mean()))
+            return x.mean(), y.mean()
+        w /= wsum # normalized
         # alternative approach: replace -ve weights with 0
         #w = np.float32(np.where(w >= 0, w, 0))
         #try: w /= w.sum() # normalized

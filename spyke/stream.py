@@ -1,5 +1,34 @@
 """Stream objects for requesting arbitrary time ranges of data from various file types
-in a common way"""
+in a common way.
+
+To test streams thoroughly:
+
+* open up all 3 kinds of windows (spike, chart, LFP) and scroll around
+* scroll to the very start and end of a stream. Do the start and end timepoint
+  buttons correspond to the current displayed time position when at start and end of stream
+  respectively?
+* try zooming in and out in time on all the windows
+* change between all the different settings for each of the pre-processing options:
+  Filtering, CAR and Sampling
+* export raw data to .dat, then open the .dat and compare with original using two instances
+  of spyke. They should be identical, down to the last pixel. Compare them while doing all
+  of the above
+* also export high and low-pass data to .dat and compare with original
+
+First do the above for single Streams (DATStream, NSXStream, SurfStream, SimpleStream),
+then repeat for MultiStreams of all the above types. For simplicity, work on a
+MultiStream that is made up of only two short single Streams.
+
+Additional MultiStream tests:
+
+* compare the original single Streams with their appropriate spots in the MultiStream. Use
+  the MultiStream's .tranges array to tell you where to scroll to in the MultiStream to
+  find the equivalent start and end positions of the all of its constituent Streams.
+  Do this while varying the pre-processing settings.
+* in addition to exporting raw data to .dat and comparing to the MultiStream, also compare to
+  the constituent Streams
+
+"""
 
 from __future__ import division
 from __future__ import print_function
@@ -9,16 +38,17 @@ __authors__ = ['Martin Spacek']
 import os
 import time
 from datetime import timedelta
+from collections import OrderedDict as odict
+
 import numpy as np
 
-import core
-from core import (WaveForm, EmptyClass, intround, intfloor, intceil, lrstrip, MU,
-                  hamming, filterord, WMLDR, td2fusec)
-from core import (DEFHPRESAMPLEX, DEFLPSAMPLFREQ, DEFHPSRFSHCORRECT,
-                  DEFHPDATSHCORRECT, DEFDATFILTMETH, DEFHPNSXSHCORRECT, DEFNSXFILTMETH, DEFCAR,
-                  BWHPF0, BWLPF1, BWHPORDER, BWLPORDER, LOWPASSFILTER,
-                  SRFNCHANSPERBOARD, KERNELSIZE, XSWIDEBANDPOINTS)
-import probes
+from . import core, probes
+from .core import (WaveForm, EmptyClass, intround, lrstrip,
+                   hamming, filterord, WMLDR, td2fusec)
+from .core import (DEFHPRESAMPLEX, DEFLPSAMPLFREQ, DEFHPSRFSHCORRECT,
+                   DEFHPDATSHCORRECT, DEFDATFILTMETH, DEFHPNSXSHCORRECT, DEFNSXFILTMETH,
+                   DEFCAR, BWHPF0, BWLPF1, BWHPORDER, BWLPORDER, LOWPASSFILTERLPSTREAM,
+                   SRFNCHANSPERBOARD, KERNELSIZE, XSWIDEBANDPOINTS)
 
 
 class FakeStream(object):
@@ -30,7 +60,10 @@ class FakeStream(object):
 
 
 class Stream(object):
-    """Base class for all streams"""
+    """Base class for all (single) streams"""
+    def is_multi(self):
+        """Convenience method to specify if self is a MultiStream"""
+        return False
 
     def is_open(self):
         return self.f.is_open()
@@ -158,7 +191,7 @@ class Stream(object):
         #ts = np.arange(tstart, intfloor(tstart+tres*nt), tres)
         # safer to use linspace than arange in case of float tres, deals with endpoints
         # better and gives slightly more accurate output float timestamps:
-        ts = np.linspace(tstart, tstart+(nt-1)*tres, nt)
+        ts = np.linspace(tstart, tstart+(nt-1)*tres, nt) # end inclusive
         assert len(ts) == nt
         # resampled data, leave as int32 for convolution, then convert to int16:
         data = np.empty((nchans, nt), dtype=np.int32)
@@ -170,7 +203,11 @@ class Stream(object):
         # taps off of ADchan 0, but for probes like pt16a_HS27 and pt16b_HS27, it seems
         # ADchans start at 4.
         for chani, chan in enumerate(chans):
-            for point, kernel in enumerate(self.kernels[chan]):
+            try:
+                kernels = self.kernels[chan]
+            except KeyError: # all channels have the same kernels
+                kernels = self.kernels[None]
+            for point, kernel in enumerate(kernels):
                 """np.convolve(a, v, mode)
                 for mode='same', only the K middle values are returned starting at n = (M-1)/2
                 where K = len(a)-1 and M = len(v) - 1 and K >= M
@@ -221,7 +258,8 @@ class Stream(object):
         """
         if ADchans is None: # no per-channel delay:
             assert self.shcorrect == False
-            dis = np.zeros(self.nchans, dtype=np.int64)
+            chans = [None] # use same kernels for all channels
+            dis = np.array([0])
         else:
             assert self.shcorrect == True
             # ordinal position of each ADchan in the hold queue of its ADC board:
@@ -235,7 +273,7 @@ class Stream(object):
         kernels = {} # dict of array of kernels, indexed by [chan][resample point]
         for chan, d in zip(chans, ds): # chans and corresponding delays
             kernelrow = []
-            for point in xrange(resamplex): # iterate over resampled points per raw point
+            for point in range(resamplex): # iterate over resampled points per raw point
                 t0 = point/resamplex # some fraction of 1
                 tstart = -N/2 - t0 - d
                 tend = tstart + (N+1)
@@ -248,6 +286,33 @@ class Stream(object):
                 kernelrow.append(kernel)
             kernels[chan] = kernelrow
         return kernels
+
+    def get_block_tranges(self, bs=10000000):
+        """Get time ranges spanning self, in block sizes of bs us"""
+        tranges = []
+        for start in np.arange(self.t0, self.t1, bs):
+            stop = start + bs
+            tranges.append((start, stop))
+        tranges = np.asarray(tranges)
+        # don't exceed self.t1:
+        tranges[-1, -1] = self.t1
+        return tranges
+
+    def get_block_data(self, bs=10000000, step=None, chans=None, units='uV'):
+        """Get blocks of data in block sizes of bs us, keeping every step'th data point
+        (default keeps all), on specified chans, in units"""
+        tranges = self.get_block_tranges(bs=bs)
+        data = []
+        for (start, stop) in tranges:
+            blockwave = self(start, stop, chans=chans)
+            data.append(blockwave.data[::step]) # decimate
+        data = np.concatenate(data, axis=1) # concatenate horizontally
+        if units is None:
+            return data
+        elif units == 'uV':
+            return self.converter.AD2uV(data)
+        else:
+            raise ValueError("Unknown units %r" % units)
 
 
 class DATStream(Stream):
@@ -265,6 +330,7 @@ class DATStream(Stream):
         self.converter = core.DatConverter(f.fileheader.AD2uVx)
 
         self.probe = f.fileheader.probe
+        self.adapter = f.fileheader.adapter
 
         self.rawsampfreq = f.fileheader.sampfreq # Hz
         self.rawtres = 1 / self.rawsampfreq * 1e6 # float us
@@ -281,57 +347,105 @@ class DATStream(Stream):
             # for simplicity, don't allow s+h correction of lowpass data, no reason to anyway:
             assert self.shcorrect == False
 
+<<<<<<< HEAD
         self.chans = f.fileheader.chans
+=======
+        # always keep probe chans sorted, even if they aren't sorted in the data file
+        # (such as when using an adapter). Actual data order is handled by self.__call__
+        self.chans = np.sort(f.fileheader.chans)
+
+>>>>>>> upstream/master
         self.contiguous = f.contiguous
 
         self.t0, self.t1 = f.t0, f.t1
         self.tranges = np.asarray([[self.t0, self.t1]])
 
-    def __call__(self, start, stop, chans=None):
-        """Called when Stream object is called using (). start and stop indicate start and end
-        timepoints in us wrt t=0. Returns the corresponding WaveForm object with just the
-        specified chans"""
+    def get_filtering(self):
+        """Get filtering settings in an odict, based on self.kind and self.filtmeth"""
+        if not self.filtmeth:
+            return None # nothing to report, don't even bother with odict
+        od = odict()
+        od['meth'] = self.filtmeth
+        if self.kind == 'highpass':
+            if self.filtmeth.startswith('BW'):
+                od['f0'] = BWHPF0
+                od['f1'] = None
+                od['order'] = BWHPORDER
+        elif self.kind == 'lowpass':
+            if self.filtmeth.startswith('BW'):
+                od['f0'] = None
+                od['f1'] = BWLPF1
+                od['order'] = BWLPORDER
+        else:
+            raise ValueError
+        return od
+
+    filtering = property(get_filtering)
+
+    def __call__(self, start=None, stop=None, chans=None):
+        """Called when Stream object is called using (). start and stop are timepoints in us
+        wrt t=0. Returns the corresponding WaveForm object with just the specified chans.
+
+        As of 2017-10-24 I'm not sure if this behaviour qualifies as end-inclusive or not,
+        but I suspect not. See how these single Streams are called in MultiStream.__call__
+        """
+        if start is None:
+            start = self.t0
+        if stop is None:
+            stop = self.t1
         if chans is None:
             chans = self.chans
         kind = self.kind
-        if not set(chans).issubset(self.chans):
-            raise ValueError("requested chans %r are not a subset of available enabled "
+        try:
+            # where to find requested chans in enabled self.chans:
+            chanis = core.argmatch(self.chans, chans)
+        except ValueError:
+            raise IndexError("requested chans %r are not a subset of available enabled "
                              "chans %r in %s stream" % (chans, self.chans, kind))
-        # NOTE: because CAR needs to average across as many channels as possible, work on
+        # NOTE: because CAR needs to average across as many channels as possible, keep
         # the full self.chans (which are the chans enabled in the stream) until the very end,
         # and only then slice out what is potentially a subset of self.chans using `chans`
-        rawtres = self.rawtres
+        tres, rawtres = self.tres, self.rawtres # float us
+        # mintres handles both high-pass data where tres < rawtres, and low-pass decimated
+        # data where tres > rawtres:
+        mintres = min(tres, rawtres)
         if kind == 'highpass':
             resample = self.sampfreq != self.rawsampfreq or self.shcorrect == True
             decimate = False
-        else: # kind == 'lowpass'
+        elif kind == 'lowpass':
             resample = False # which also means no s+h correction allowed
             decimate = True
+            assert self.rawsampfreq % self.sampfreq == 0
+            decimatex = intround(self.rawsampfreq / self.sampfreq)
+        else:
+            raise ValueError('unknown stream kind %r' % kind)
 
-        # excess data in us at either end, to eliminate filtering and interpolation
+        # excess data to get at either end, to eliminate filtering and interpolation
         # edge effects:
         #print('XSWIDEBANDPOINTS: %d' % XSWIDEBANDPOINTS)
-        xs = XSWIDEBANDPOINTS * rawtres
+        xs = XSWIDEBANDPOINTS * rawtres # us
         #print('xs: %d, rawtres: %g' % (xs, rawtres))
 
-        # stream limits, in us and in sample indices, wrt t=0 and sample=0:
-        t0, t1, nt = self.t0, self.t1, self.f.nt
+        nt = self.f.nt
+        # stream limits in sample indices, wrt sample=0:
         t0i, t1i = self.f.t0i, self.f.t1i
-        # get a slightly greater range of raw data (with xs) than might be needed:
-        t0xsi = intfloor((start - xs) / rawtres) # round down to nearest mult of rawtres
-        t1xsi = intceil((stop + xs) / rawtres) # round up to nearest mult of rawtres
-        # stay within stream limits, thereby avoiding interpolation edge effects:
+        # calculate *slice* indices t0xsi and t1xsi, for a greater range of
+        # raw data (with xs) than requested:
+        t0xsi = intround((start - xs) / rawtres) # round to nearest mult of rawtres
+        t1xsi = intround((stop + xs) / rawtres) # round to nearest mult of rawtres
+        # stay within stream *slice* limits, thereby avoiding interpolation edge effects:
         t0xsi = max(t0xsi, t0i)
-        t1xsi = min(t1xsi, t1i)
-        # convert back to nearest float us:
+        t1xsi = min(t1xsi, t1i+1)
+        # convert slice indices back to nearest float us:
         t0xs = t0xsi * rawtres
         t1xs = t1xsi * rawtres
-        # these are slice indices, so don't add 1:
+        # these are slice indices, so don't add 1 when calculating ntxs:
         ntxs = t1xsi - t0xsi # int
-        tsxs = np.linspace(t0xs, t0xs+(ntxs-1)*rawtres, ntxs)
-        #print('ntxs: %d' % ntxs)
+        tsxs = np.linspace(t0xs, t0xs+(ntxs-1)*rawtres, ntxs) # end inclusive
+        #print('t0xs, t1xs, ntxs: %f, %f, %d' % (t0xs, t1xs, ntxs))
 
-        # init dataxs; unlike for .srf files, int32 dataxs array isn't necessary for
+        # Init dataxs, sized to hold all enabled channels.
+        # Unlike for .srf files, int32 dataxs array isn't necessary for
         # int16 .dat or .nsx files, since there's no need to zero or rescale
 
         dataxs = np.zeros((self.nchans, ntxs), dtype=np.int16) # any gaps will have zeros
@@ -343,43 +457,57 @@ class DATStream(Stream):
         only subsample after filtering.
         '''
         #tload = time.time()
-        # source indices:
+        # source slice indices:
         st0i = max(t0xsi - t0i, 0)
         st1i = min(t1xsi - t0i, nt)
         assert st1i-st0i == ntxs
-        # destination indices:
+        # destination slice indices:
         dt0i = max(t0i - t0xsi, 0)
-        dt1i = min(t1i - t0xsi, ntxs)
-        dataxs[:, dt0i:dt1i] = self.f.data[:, st0i:st1i]
+        dt1i = min(t1i + 1 - t0xsi, ntxs)
+        allchanis = core.argmatch(self.f.fileheader.chans, self.chans)
+        dataxs[:, dt0i:dt1i] = self.f.data[allchanis, st0i:st1i]
         #print('data load took %.3f sec' % (time.time()-tload))
 
         #print('filtmeth: %s' % self.filtmeth)
         if self.filtmeth == None:
             pass
-        elif self.filtmeth == 'BW':
-            # high or low pass filter using Butterworth filter:
+        elif self.filtmeth in ['BW', 'BWNC']:
+            # High- or low-pass filter the raw data using a Butterworth filter.
+            # Default to causal filtering to get high-pass data with added phase lag,
+            # in order to preserve expected spike shape for spike detection. Use noncausal
+            # (forward-backward) filtering to get low-pass LFP data without phase lag:
+            if self.filtmeth == 'BW':
+                hpcausal = True
+            else: # self.filtmeth == 'BWNC'
+                hpcausal = False
+            f = self.filtering
             if kind == 'highpass':
-                btype, order, f0, f1 = kind, BWHPORDER, BWHPF0, None
+                btype, order, f0, f1 = kind, f['order'], f['f0'], f['f1']
                 dataxs, b, a = filterord(dataxs, sampfreq=self.rawsampfreq, f0=f0, f1=f1,
-                                         order=order, rp=None, rs=None,
-                                         btype=btype, ftype='butter') # float64
+                                         order=order, rp=None, rs=None, btype=btype,
+                                         ftype='butter', causal=hpcausal) # float64
             else: # kind == 'lowpass'
-                if LOWPASSFILTER:
-                    btype, order, f0, f1 = kind, BWLPORDER, None, BWLPF1
+                if LOWPASSFILTERLPSTREAM:
+                    btype, order, f0, f1 = kind, f['order'], f['f0'], f['f1']
                     dataxs, b, a = filterord(dataxs, sampfreq=self.rawsampfreq, f0=f0, f1=f1,
-                                             order=order, rp=None, rs=None,
-                                             btype=btype, ftype='butter') # float64
+                                             order=order, rp=None, rs=None, btype=btype,
+                                             ftype='butter', causal=False) # float64
         elif self.filtmeth == 'WMLDR':
             # high pass filter using wavelet multi-level decomposition and reconstruction,
             # can't directly use this for low pass filtering, but it might be possible to
             # approximate low pass filtering with WMLDR by subtracting the high pass data
             # from the raw data...:
             assert kind == 'highpass' # for now
-            ## TODO: fix weird slow wobbling of amplitude as a function of exactly what
+            ## NOTE: WMLDR seems to leave behind some very low frequencies, resulting
+            ## in weird slow wobbling of amplitude as a function of exactly what
             ## the WMLDR filtering time range happens to be. Setting a much bigger xs
             ## helps, but only until you move xs amount of time away from the start of
-            ## the recording. Perhaps WMLDR doesn't quite remove all the low freqs the way
-            ## Butterworth filtering does
+            ## the recording. I think WMLDR doesn't quite remove all the low freqs the way
+            ## Butterworth filtering does. Applying a Butterworth filter non-causally
+            ## results in exactly the same very low level of spike shape distortion as does
+            ## WMLDR, but without leaving behind the very low frequency component, so there's
+            ## really no reason to use WMLDR, unless you need online filtering with very
+            ## low spike distortion
             dataxs = WMLDR(dataxs)
         else:
             raise ValueError('unknown filter method %s' % self.filtmeth)
@@ -404,24 +532,31 @@ class DATStream(Stream):
             #tresample = time.time()
             dataxs, tsxs = self.resample(dataxs, tsxs, self.chans)
             #print('resample took %.3f sec' % (time.time()-tresample))
-        if decimate:
-            decimatex = intround(self.rawsampfreq / self.sampfreq)
-            dataxs, tsxs = dataxs[:, ::decimatex], tsxs[::decimatex]
 
-        #nresampletxs = len(tsxs)
-        #print('ntxs, nresampletxs: %d, %d' % (ntxs, nresampletxs))
+        nresampletxs = len(tsxs)
+        #print('Stream ntxs, nresampletxs: %d, %d' % (ntxs, nresampletxs))
         #assert ntxs == len(tsxs)
 
-        # now trim down to just the requested time range and chans:
-        # for trimming time range, work on us integer values to prevent floating point
-        # round-off error (when tres is non-integer us) that can occasionally
+        # Trim down to just the requested time range and chans, and optionally decimate.
+        # For trimming time range, use integer multiple of mintres to prevent floating point
+        # round-off error (when mintres is non-integer us) that can occasionally
         # cause searchsorted to produce off-by-one indices:
-        lo, hi = intround(tsxs).searchsorted(intround([start, stop]))
-        chanis = self.f.fileheader.chans.searchsorted(chans)
-        data = dataxs[chanis, lo:hi]
-        ts = tsxs[lo:hi]
-        #print('slice:', start, stop, self.tres, data.shape)
+        tsxsi = intround(tsxs / mintres)
+        starti, stopi = intround(start/mintres), intround(stop/mintres)
+        lo, hi = tsxsi.searchsorted([starti, stopi])
 
+        # Slice out chanis here only at the very end, because we want to use all
+        # enabled chans up to this point for CAR, even those that we ultimately don't
+        # need to return, because any extra chans that are enabled but aren't requested
+        # will nevertheless affect the mean/median:
+        if decimate:
+            data = dataxs[chanis, lo:hi:decimatex]
+            ts = tsxs[lo:hi:decimatex]
+        else:
+            data = dataxs[chanis, lo:hi]
+            ts = tsxs[lo:hi]
+
+        #print('Stream start, stop, tres, shape:\n', start, stop, self.tres, data.shape)
         # should be safe to convert back down to int16 now:
         data = np.int16(data)
         return WaveForm(data=data, ts=ts, chans=chans)
@@ -441,12 +576,8 @@ class NSXStream(DATStream):
 
         self.converter = core.NSXConverter(f.fileheader.AD2uVx)
 
-        # maybe the comment specifies the probe type?
-        probename = f.fileheader.comment.replace(' ', '_')
-        if probename == '':
-            probename = probes.DEFNSXPROBETYPE # A1x32
-            print('WARNING: assuming probe %r was used in this recording' % probename)
-        self.probe = probes.getprobe(probename)
+        self.probe = f.fileheader.probe
+        self.adapter = f.fileheader.adapter
 
         self.rawsampfreq = f.fileheader.sampfreq # Hz
         self.rawtres = 1 / self.rawsampfreq * 1e6 # float us
@@ -468,7 +599,9 @@ class NSXStream(DATStream):
         # <support@blackrock.com>
         assert self.shcorrect == False
 
-        self.chans = f.fileheader.chans
+        # always keep chans sorted, even if they aren't in the underlying data in the file
+        # (such as when using an adapter). Actual data order is handled by self.__call__
+        self.chans = np.sort(f.fileheader.chans)
 
         self.contiguous = f.contiguous
 
@@ -494,7 +627,7 @@ class SurfStream(Stream):
         else: raise ValueError('Unknown stream kind %r' % kind)
 
         self.filtmeth = filtmeth
-        self.car = car or DEFCAR
+        self.car = car
 
         # assume same layout for all records of type "kind"
         self.layout = self.f.layoutrecords[self.records['Probe'][0]]
@@ -519,9 +652,10 @@ class SurfStream(Stream):
             self.chans = self.layout.chans
             self.sampfreq = sampfreq or self.rawsampfreq # don't resample by default
             self.shcorrect = shcorrect or False # don't s+h correct by default
+
         probename = self.layout.electrode_name
-        probename = probename.replace(MU, 'u') # replace any 'micro' symbols with 'u'
         self.probe = probes.getprobe(probename)
+        self.adapter = None
 
         rts = self.records['TimeStamp'] # array of record timestamps
         NumSamples = np.unique(self.records['NumSamples'])
@@ -573,23 +707,49 @@ class SurfStream(Stream):
 
     def get_masterclockfreq(self):
         return self.f.layoutrecords[0].MasterClockFreq
-        
+
     masterclockfreq = property(get_masterclockfreq)
+
+    def get_filtering(self):
+        """Get filtering settings. For .srf files, these are fixed hardware settings"""
+        od = odict()
+        if self.kind == 'highpass':
+            od['meth'] = 'high-pass hardware analog filter'
+            od['f0'], od['f1'] = 500, 6000 # Hz
+        elif self.kind == 'lowpass':
+            od['meth'] = 'low-pass hardware analog filter'
+            od['f0'], od['f1'] = 0.1, 150 # Hz
+        else:
+            raise ValueError
+        return od
+
+    filtering = property(get_filtering)
 
     def pickle(self):
         self.f.pickle()
 
-    def __call__(self, start, stop, chans=None):
-        """Called when Stream object is called using (). start and stop indicate start and end
-        timepoints in us wrt t=0. Returns the corresponding WaveForm object with just the
-        specified chans"""
+    def __call__(self, start=None, stop=None, chans=None):
+        """Called when Stream object is called using (). start and stop are timepoints in us
+        wrt t=0. Returns the corresponding WaveForm object with just the specified chans.
+
+        As of 2017-10-24 I'm not sure if this behaviour qualifies as end-inclusive or not,
+        but I suspect not. See how these single Streams are called in MultiStream.__call__
+        """
+        if start is None:
+            start = self.t0
+        if stop is None:
+            stop = self.t1
         if chans is None:
             chans = self.chans
+        kind = self.kind
         if not set(chans).issubset(self.chans):
             raise ValueError("requested chans %r are not a subset of available enabled "
                              "chans %r in %s stream" % (chans, self.chans, self.kind))
         nchans = len(chans)
-        rawtres = self.rawtres # float us
+        tres, rawtres = self.tres, self.rawtres # float us
+        # mintres handles both high-pass data where tres < rawtres (40 us), and low-pass
+        # data where tres = rawtres (1000 us):
+        mintres = min(tres, rawtres)
         resample = self.sampfreq != self.rawsampfreq or self.shcorrect == True
         if resample:
             # excess data in us at either end, to eliminate interpolation distortion at
@@ -601,18 +761,18 @@ class SurfStream(Stream):
         t0i = intround(self.t0 / rawtres)
         t1i = intround(self.t1 / rawtres)
         # get a slightly greater range of raw data (with xs) than might be needed:
-        t0xsi = intfloor((start - xs) / rawtres) # round down to nearest mult of rawtres
-        t1xsi = intceil((stop + xs) / rawtres) # round up to nearest mult of rawtres
-        # stay within stream limits, thereby avoiding interpolation edge effects:
+        t0xsi = intround((start - xs) / rawtres) # round to nearest mult of rawtres
+        t1xsi = intround((stop + xs) / rawtres) # round to nearest mult of rawtres
+        # stay within stream *slice* limits, thereby avoiding interpolation edge effects:
         t0xsi = max(t0xsi, t0i)
-        t1xsi = min(t1xsi, t1i)
+        t1xsi = min(t1xsi, t1i+1)
         # convert back to nearest float us:
         t0xs = t0xsi * rawtres
         t1xs = t1xsi * rawtres
         # these are slice indices, so don't add 1:
         ntxs = t1xsi - t0xsi # int
-        tsxs = np.linspace(t0xs, t0xs+(ntxs-1)*rawtres, ntxs)
-        #print('ntxs: %d' % ntxs)
+        tsxs = np.linspace(t0xs, t0xs+(ntxs-1)*rawtres, ntxs) # end inclusive
+        #print('t0xs, t1xs, ntxs: %f, %f, %d' % (t0xs, t1xs, ntxs))
 
         # init data as int32 so we have bitwidth to rescale and zero, convert to int16 later
         dataxs = np.zeros((nchans, ntxs), dtype=np.int32) # any gaps will have zeros
@@ -644,7 +804,7 @@ class SurfStream(Stream):
         # load up data+excess, from all relevant records
         # TODO: fix code duplication
         #tload = time.time()
-        if self.kind == 'highpass': # straightforward
+        if kind == 'highpass': # straightforward
             chanis = self.layout.ADchanlist.searchsorted(chans)
             for record in records: # iterating over highpass records
                 d = self.f.loadContinuousRecord(record)[chanis] # record's data on chans
@@ -698,18 +858,24 @@ class SurfStream(Stream):
 
         ## TODO: add CAR here, after S+H correction (in self.resample) rather than before it,
         ## because CAR assumes simultaneous timepoints across chans. Also need to slice out
-        ## chans only at the very end, as in DATStream
+        ## chans only at the very end, as in DATStream, and size and maintain dataxs with
+        ## enabled self.chans as rows, not requested chans as rows, which might be only a
+        ## subset of self.chans
         if self.car:
             raise NotImplementedError("SurfStream doesn't support CAR yet")
 
-        # now trim down to just the requested time range, work on us integer values to prevent
-        # floating point round-off error (when tres is non-integer us) that can occasionally
+        # Trim down to just the requested time range.
+        # For trimming time range, use integer multiple of mintres to prevent floating point
+        # round-off error (when mintres is non-integer us) that can occasionally
         # cause searchsorted to produce off-by-one indices:
-        lo, hi = intround(tsxs).searchsorted(intround([start, stop]))
+        tsxsi = intround(tsxs / mintres)
+        starti, stopi = intround(start/mintres), intround(stop/mintres)
+        lo, hi = tsxsi.searchsorted([starti, stopi])
+
         data = dataxs[:, lo:hi]
         ts = tsxs[lo:hi]
-        #print('SRF:', start, stop, self.tres, data.shape)
 
+        #print('Stream start, stop, tres, shape:\n', start, stop, self.tres, data.shape)
         # should be safe to convert back down to int16 now:
         data = np.int16(data)
         return WaveForm(data=data, ts=ts, chans=chans)
@@ -723,7 +889,7 @@ class SimpleStream(Stream):
         self._fname = fname
         self.wavedata = wavedata
         self.filtmeth = filtmeth
-        self.car = car or DEFCAR
+        self.car = car
         nchans, nt = wavedata.shape
         self.chans = np.arange(nchans) # this sets self.nchans
         self.nt = nt
@@ -790,18 +956,29 @@ class SimpleStream(Stream):
         except KeyError: pass
         return d
 
-    def __call__(self, start, stop, chans=None):
-        """Called when Stream object is called using (). start and stop indicate start and end
-        timepoints in us wrt t=0. Returns the corresponding WaveForm object with just the
-        specified chans"""
+    def __call__(self, start=None, stop=None, chans=None):
+        """Called when Stream object is called using (). start and stop are timepoints in us
+        wrt t=0. Returns the corresponding WaveForm object with just the specified chans.
+
+        As of 2017-10-24 I'm not sure if this behaviour qualifies as end-inclusive or not,
+        but I suspect not. See how these single Streams are called in MultiStream.__call__
+        """
+        if start is None:
+            start = self.t0
+        if stop is None:
+            stop = self.t1
         if chans is None:
             chans = self.chans
+        kind = self.kind
         if not set(chans).issubset(self.chans):
             raise ValueError("requested chans %r are not a subset of available enabled "
-                             "chans %r in %s stream" % (chans, self.chans, self.kind))
+                             "chans %r in %s stream" % (chans, self.chans, kind))
         nchans = len(chans)
         chanis = self.ADchans.searchsorted(chans)
-        rawtres = self.rawtres # float us
+        tres, rawtres = self.tres, self.rawtres # float us
+        # mintres handles both high-pass data where tres < rawtres, and low-pass decimated
+        # data where tres > rawtres:
+        mintres = min(tres, rawtres)
         resample = self.sampfreq != self.rawsampfreq or self.shcorrect == True
         if resample:
             # excess data in us at either end, to eliminate interpolation distortion at
@@ -813,24 +990,24 @@ class SimpleStream(Stream):
         t0i = intround(self.t0 / rawtres)
         t1i = intround(self.t1 / rawtres)
         # get a slightly greater range of raw data (with xs) than might be needed:
-        t0xsi = intfloor((start - xs) / rawtres) # round down to nearest mult of rawtres
-        t1xsi = intceil((stop + xs) / rawtres) # round up to nearest mult of rawtres
-        # stay within stream limits, thereby avoiding interpolation edge effects:
+        t0xsi = intround((start - xs) / rawtres) # round to nearest mult of rawtres
+        t1xsi = intround((stop + xs) / rawtres) # round to nearest mult of rawtres
+        # stay within stream *slice* limits, thereby avoiding interpolation edge effects:
         t0xsi = max(t0xsi, t0i)
-        t1xsi = min(t1xsi, t1i)
+        t1xsi = min(t1xsi, t1i+1)
         # convert back to nearest float us:
         t0xs = t0xsi * rawtres
         t1xs = t1xsi * rawtres
         # these are slice indices, so don't add 1:
         ntxs = t1xsi - t0xsi # int
-        tsxs = np.linspace(t0xs, t0xs+(ntxs-1)*rawtres, ntxs)
-        #print('ntxs: %d' % ntxs)
+        tsxs = np.linspace(t0xs, t0xs+(ntxs-1)*rawtres, ntxs) # end inclusive
+        #print('t0xs, t1xs, ntxs: %f, %f, %d' % (t0xs, t1xs, ntxs))
 
         # slice out excess data on requested channels, init as int32 so we have bitwidth
         # to rescale and zero, convert to int16 later:
         dataxs = np.int32(self.wavedata[chanis, t0xsi:t1xsi])
 
-        # bitshift left by 4 to scale 12 bit values to use full 16 bit dynamic range, same as
+        # bitshift left by self.bitshift to use full 16 bit dynamic range, same as
         # * 2**(16-12) == 16. This provides more fidelity for interpolation, reduces uV per
         # AD to about 0.02
         if self.bitshift:
@@ -848,18 +1025,24 @@ class SimpleStream(Stream):
 
         ## TODO: add CAR here, after S+H correction (in self.resample) rather than before it,
         ## because CAR assumes simultaneous timepoints across chans. Also need to slice out
-        ## chans only at the very end, as in DATStream
+        ## chans only at the very end, as in DATStream, and size and maintain dataxs with
+        ## enabled self.chans as rows, not requested chans as rows, which might be only a
+        ## subset of self.chans
         if self.car:
             raise NotImplementedError("SimpleStream doesn't support CAR yet")
 
-        # now trim down to just the requested time range, work on us integer values to prevent
-        # floating point round-off error (when tres is non-integer us) that can occasionally
+        # Trim down to just the requested time range.
+        # For trimming time range, use integer multiple of mintres to prevent floating point
+        # round-off error (when mintres is non-integer us) that can occasionally
         # cause searchsorted to produce off-by-one indices:
-        lo, hi = intround(tsxs).searchsorted(intround([start, stop]))
+        tsxsi = intround(tsxs / mintres)
+        starti, stopi = intround(start/mintres), intround(stop/mintres)
+        lo, hi = tsxsi.searchsorted([starti, stopi])
+
         data = dataxs[:, lo:hi]
         ts = tsxs[lo:hi]
-        #print('SIM:', start, stop, self.tres, data.shape)
 
+        #print('Stream start, stop, tres, shape:\n', start, stop, self.tres, data.shape)
         # should be safe to convert back down to int16 now:
         data = np.int16(data)
         return WaveForm(data=data, ts=ts, chans=chans)
@@ -890,24 +1073,6 @@ class MultiStream(object):
         if not (np.diff(datetimes) >= timedelta(0)).all():
             raise RuntimeError("files aren't in temporal order")
 
-        """Generate tranges, an array of all the contiguous data ranges in all the
-        streams in self. These are relative to the start of acquisition (t=0) in the first
-        stream. Also generate streamtranges, an array of each stream's t0 and t1"""
-        tranges, streamtranges = [], []
-        for stream in streams:
-            td = stream.datetime - datetimes[0] # time delta between stream i and stream 0
-            for trange in stream.tranges:
-                t0 = td2fusec(td + timedelta(microseconds=trange[0]))
-                t1 = td2fusec(td + timedelta(microseconds=trange[1]))
-                tranges.append([t0, t1])
-            streamt0 = td2fusec(td + timedelta(microseconds=stream.t0))
-            streamt1 = td2fusec(td + timedelta(microseconds=stream.t1))
-            streamtranges.append([streamt0, streamt1])
-        self.tranges = np.asarray(tranges)
-        self.streamtranges = np.asarray(streamtranges)
-        self.t0 = self.streamtranges[0, 0]
-        self.t1 = self.streamtranges[-1, 1]
-
         try: self.layout = streams[0].layout # assume they're identical
         except AttributeError: pass
         try:
@@ -930,13 +1095,41 @@ class MultiStream(object):
         if not contiguous.all() and kind == 'highpass':
             # don't bother reporting again for lowpass
             fnames = [ s.fname for s, c in zip(streams, contiguous) if not c ]
-            print("some files are non contiguous:")
+            print("Some files are non contiguous:")
             for fname in fnames:
                 print(fname)
         probe = streams[0].probe
+        adapter = streams[0].adapter
         if not np.all([type(probe) == type(stream.probe) for stream in streams]):
             raise RuntimeError("some files have different probe types")
+        if not np.all([type(adapter) == type(stream.adapter) for stream in streams]):
+            raise RuntimeError("some files have different adapter types")
         self.probe = probe # they're identical
+        self.adapter = adapter # they're identical
+
+        """Generate tranges, an array of all the contiguous data ranges in all the
+        streams in self. These are relative to the start of acquisition (t=0) in the first
+        stream. Round the time deltas between neighbouring streams to the nearest multiple
+        of rawtres to avoid problems indexing across streams. This works for both high-pass
+        data whose tres < rawtres, and decimated low-pass data whose tres > rawtres"""
+        tranges = []
+        rawtres = self.rawtres # float us
+        for stream in streams:
+            # time delta between this stream and first stream:
+            dt = td2fusec(stream.datetime - datetimes[0]) # float us
+            dt = intround(dt / rawtres) * rawtres # round to nearest raw timepoint
+            # stream.tranges is only ever 1 row for a regular non-multi stream:
+            assert len(stream.tranges) == 1
+            t0, t1 = stream.tranges[0]
+            streamnt = (t1 - t0) / rawtres
+            assert streamnt % 1 == 0 # ensure integer num of timepoints between t0 and t1
+            streamnt = int(streamnt)
+            t0 = intround(t0 / rawtres) * rawtres
+            t1 = t0 + streamnt * rawtres
+            tranges.append([dt+t0, dt+t1])
+        self.tranges = np.asarray(tranges)
+        self.t0 = self.tranges[0, 0] # float us
+        self.t1 = self.tranges[-1, 1] # float us
 
         # set filtmeth, car, sampfreq, and shcorrect for all streams:
         streamtype = type(streams[0])
@@ -959,13 +1152,17 @@ class MultiStream(object):
         elif streamtype == SurfStream:
             if kind == 'highpass':
                 self.filtmeth = filtmeth
-                self.car = car or DEFCAR
+                self.car = car
                 self.sampfreq = sampfreq or self.rawsampfreq * DEFHPRESAMPLEX
                 self.shcorrect = shcorrect or DEFHPSRFSHCORRECT
             else: # kind == 'lowpass'
                 self.filtmeth = filtmeth
                 self.sampfreq = sampfreq or self.rawsampfreq # don't resample by default
                 self.shcorrect = shcorrect or False # don't s+h correct by default
+
+    def is_multi(self):
+        """Convenience method to specify if self is a MultiStream"""
+        return True
 
     def is_open(self):
         return np.all([stream.is_open() for stream in self.streams])
@@ -1002,6 +1199,13 @@ class MultiStream(object):
         return os.path.splitext(fnames[0])[-1] # take extension of first fname
 
     ext = property(get_ext)
+
+    def get_srcfnameroot(self):
+        """Get root of filename of source data"""
+        srcfnameroot = lrstrip(self.fname, '../', '.track')
+        return srcfnameroot
+
+    srcfnameroot = property(get_srcfnameroot)
 
     def get_nchans(self):
         return len(self.chans)
@@ -1055,6 +1259,13 @@ class MultiStream(object):
 
     datetime = property(get_datetime)
     '''
+
+    def get_filtering(self):
+        """Get filtering settings of first stream in self"""
+        return self.streams[0].filtering
+
+    filtering = property(get_filtering)
+
     def pickle(self):
         """Just a way to pickle all the files associated with self"""
         for stream in self.streams:
@@ -1068,45 +1279,92 @@ class MultiStream(object):
             raise ValueError('unsupported slice step size: %s' % key.step)
         return self(key.start, key.stop, self.chans)
 
-    def __call__(self, start, stop, chans=None):
-        """Figure out which stream(s) the slice spans (usually just one, sometimes 0 or
-        2), send the request to the stream(s), generate the appropriate timestamps, and
-        return the waveform"""
+    def __call__(self, start=None, stop=None, chans=None):
+        """Called when Stream object is called using (). start and stop are
+        timepoints in us wrt t=0. Returns the corresponding WaveForm object with just the
+        specified chans. Figure out which stream(s) the slice spans (usually just one,
+        sometimes 0 or 2), send the request to the stream(s), generate the appropriate
+        timestamps, and return the waveform"""
+        if start is None:
+            start = self.t0
+        if stop is None:
+            stop = self.t1
         if chans is None:
             chans = self.chans
         if not set(chans).issubset(self.chans):
             raise ValueError("requested chans %r are not a subset of available enabled "
                              "chans %r in %s stream" % (chans, self.chans, self.kind))
+
+        #print('*** new MultiStream.__call__()')
         nchans = len(chans)
-        tres = self.tres
-        start = intfloor(start / tres) * tres # round down to nearest mult of tres
-        stop = intceil(stop / tres) * tres # round up to nearest mult of tres
-        start, stop = max(start, self.t0), min(stop, self.t1) # stay within stream limits
+        tres, rawtres = self.tres, self.rawtres # float us
+        #print('Multi start, stop', start, stop)
+        start, stop = max(self.t0, start), min(stop, self.t1+tres) # stay within stream limits
+        #print('Multi limit start, stop', start, stop)
+        nt = intround((stop - start) / tres) # in units of tres
+        stop = start + nt * tres # in units of tres
+        #print('Multi nearest rawtres start, stop', start, stop)
         streamis = []
         ## TODO: this could probably be more efficient by not iterating over all streams:
-        for streami, trange in enumerate(self.streamtranges):
+        for streami, trange in enumerate(self.tranges):
             if (trange[0] <= start < trange[1]) or (trange[0] <= stop < trange[1]):
                 streamis.append(streami)
-        nt = intround((stop - start) / tres)
         # safer to use linspace than arange in case of float tres, deals with endpoints
         # better and gives slightly more accurate output float timestamps:
-        ts = np.linspace(start, start+(nt-1)*tres, nt)
+        ts = np.linspace(start, start+(nt-1)*tres, nt) # end inclusive
         assert len(ts) == nt
         data = np.zeros((nchans, nt), dtype=np.int16) # any gaps will have zeros
+        # iterate over all relevant streams:
         for streami in streamis:
             stream = self.streams[streami]
-            abst0 = self.streamtranges[streami, 0] # absolute start time of stream
-            # find start and end offsets relative to abst0:
-            relt0 = max(start - abst0, 0) # stay within stream's lower limit
-            relt1 = min(stop - abst0, stream.t1 - stream.t0) # stay within stream's upper limit
+            streamt0 = intround(stream.t0 / rawtres) * rawtres
+            streamt1 = intround(stream.t1 / rawtres) * rawtres
+            abst0 = self.tranges[streami, 0] # absolute start time of this stream
+            # find start and end offsets relative to abst0, while observing lower and upper
+            # stream limits:
+            relt0 = max(0, start - abst0)
+            relt1 = min(stop - abst0, streamt1 - streamt0 + rawtres) # end inclusive at
+                                                                     # upper stream limit?
             # source slice times:
-            st0 = relt0 + stream.t0
-            st1 = relt1 + stream.t0
-            sdata = stream(st0, st1, chans).data # source data
-            # destination time indices:
-            dt0i = int((abst0 + relt0 - start) // tres) # absolute index, trunc to int
+            st0 = relt0 + streamt0
+            st1 = relt1 + streamt0
+            #print('Multi abst0, relt0, st0, st1:', abst0, relt0, st0, st1)
+            sdata = stream(st0, st1, chans).data # source data, in units of tres
+            # destination slice indices:
+            dt0i = intround((abst0 + relt0 - start) / tres) # absolute index
             dt1i = dt0i + sdata.shape[1]
-            data[:, dt0i:dt1i] = sdata
-            #print('dt0i, dt1i', dt0i, dt1i)
-            #print('MLT:', start, stop, tres, sdata.shape, data.shape)
+            #print('Multi dt0i, dt1i', dt0i, dt1i)
+            #print('Multi start, stop, tres, sdata, data:\n',
+            #      start, stop, tres, sdata.shape, data.shape)
+            data[:, dt0i:dt1i] = sdata # destination data, in units of tres
+            assert data.shape[1] == len(ts)
         return WaveForm(data=data, ts=ts, chans=chans)
+
+    def get_block_tranges(self, bs=10000000):
+        """Get time ranges spanning self, in block sizes of bs us
+        HACK: this was copied from Stream class"""
+        tranges = []
+        for start in np.arange(self.t0, self.t1, bs):
+            stop = start + bs
+            tranges.append((start, stop))
+        tranges = np.asarray(tranges)
+        # don't exceed self.t1:
+        tranges[-1, -1] = self.t1
+        return tranges
+
+    def get_block_data(self, bs=10000000, step=None, chans=None, units='uV'):
+        """Get blocks of data in block sizes of bs us, keeping every step'th data point
+        (default keeps all), on specified chans, in units.
+        HACK: this was copied from Stream class"""
+        tranges = self.get_block_tranges(bs=bs)
+        data = []
+        for (start, stop) in tranges:
+            blockwave = self(start, stop, chans=chans)
+            data.append(blockwave.data[::step]) # decimate
+        data = np.concatenate(data, axis=1) # concatenate horizontally
+        if units is None:
+            return data
+        elif units == 'uV':
+            return self.converter.AD2uV(data)
+        else:
+            raise ValueError("Unknown units %r" % units)

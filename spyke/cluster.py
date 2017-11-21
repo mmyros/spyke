@@ -15,8 +15,8 @@ from PyQt4.QtCore import Qt
 getSaveFileName = QtGui.QFileDialog.getSaveFileName
 from OpenGL import GL, GLU
 
-from core import SpykeToolWindow, lstrip, lst2shrtstr, tocontig
-from plot import CLUSTERCOLOURSRGB, GREYRGB, CLUSTERCOLOURRGBDICT
+from .core import SpykeToolWindow, lstrip, lst2shrtstr, tocontig
+from .plot import CLUSTERCOLOURSRGB, GREYRGB, CLUSTERCOLOURRGBDICT
 
 CLUSTERPARAMMAXSAMPLES = 2000
 VIEWDISTANCE = 50
@@ -278,16 +278,18 @@ class GLWidget(QtOpenGL.QGLWidget):
             if self.axes in ['both', 'focal']:
                 self.paint_focal_axes()
 
-        # doesn't seem to be necessary, even though I'm in double-buffered mode with the
-        # back buffer for RGB sid encoding, but do it anyway for completeness
-        self.swapBuffers()
+        # doesn't seem to be necessary, even though double-buffered mode is set with the
+        # back buffer for RGB sid encoding. In fact, swapBuffers() call seems to cause
+        # flickering, so leave disabled:
+        #self.swapBuffers()
 
     def resizeGL(self, width, height):
         GL.glViewport(0, 0, width, height)
         GL.glMatrixMode(GL.GL_PROJECTION)
         GL.glLoadIdentity()
-        # fov (deg) controls amount of perspective, and as a side effect initial apparent size
-        GLU.gluPerspective(45, width/height, 0.0001, 1000) # fov, aspect, nearz & farz clip planes
+        # fov (deg) controls amount of perspective, and as a side effect initial apparent size.
+        # fov, aspect, nearz & farz clip planes:
+        GLU.gluPerspective(45, width/height, 0.0001, 1000)
         GL.glMatrixMode(GL.GL_MODELVIEW)
 
     def paint_mini_axes(self):
@@ -788,7 +790,7 @@ class GLWidget(QtOpenGL.QGLWidget):
             sw.spykewindow.ui.plotButton.click() # same as hitting ENTER in nslist
         elif key == Qt.Key_F11:
             self.parent().keyPressEvent(event) # pass it on to parent Cluster window
-        elif key in [Qt.Key_A, Qt.Key_Escape, Qt.Key_Delete, Qt.Key_M, Qt.Key_G,
+        elif key in [Qt.Key_A, Qt.Key_N, Qt.Key_Escape, Qt.Key_Delete, Qt.Key_M, Qt.Key_G,
                      Qt.Key_Equal, Qt.Key_Minus,
                      Qt.Key_Slash, Qt.Key_P, Qt.Key_Backslash, Qt.Key_NumberSign, Qt.Key_R,
                      Qt.Key_Space, Qt.Key_B, Qt.Key_Comma, Qt.Key_Period,
@@ -821,7 +823,7 @@ class GLWidget(QtOpenGL.QGLWidget):
                 QtGui.QMessageBox.critical(
                     self.panel, "Error saving file", str(e),
                     QtGui.QMessageBox.Ok, QtGui.QMessageBox.NoButton)
-            print('cluster plot saved to %r' % fname)
+            print('Cluster plot saved to %r' % fname)
 
 
     def showToolTip(self):

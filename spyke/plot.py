@@ -26,7 +26,7 @@ from matplotlib.patches import Rectangle
 from matplotlib.collections import LineCollection, PolyCollection
 from matplotlib.mlab import poly_between
 
-from core import MICRO, hex2rgb, toiter, intround
+from .core import hex2rgb, toiter, intround
 
 RED = '#ff0000'
 ORANGE = '#ff7f00'
@@ -95,7 +95,7 @@ RASTERZORDER = 6
 class ColourDict(dict):
     """Just an easy way to cycle through colours given some index,
     like say a chan id or a neuron id. Better than using a generator,
-    cuz you don't need to keep calling .next(). This is like a dict
+    because you don't need to keep calling next(). This is like a dict
     of infinite length"""
     def __init__(self, colours=None, nocolour=None):
         self.colours = colours
@@ -139,27 +139,64 @@ class Plot(object):
         """Update LineCollection segments data from wave, and associated Fill.
         It's up to the caller to update colours if needed"""
         self.tref = tref
-        AD2uV = self.panel.AD2uV
+        panel = self.panel
         nchans, npoints = wave.data.shape
         segments = np.zeros((nchans, npoints, 2)) # x vals in col 0, yvals in col 1
-        data = AD2uV(wave.data) # convert AD wave data to uV
-        if wave.ts is None: # or maybe check if data.size == 0 too
-            x = []
-            y = []
-        else:
+        if wave.ts is not None: # or maybe check if wave.data.size != 0 too
+            if panel.spykewindow.ui.normButton.isChecked():
+                wave = self.norm_wave(wave)
             x = np.tile(wave.ts-tref, nchans)
             x.shape = nchans, npoints
             segments[:, :, 0] = x
-            segments[:, :, 1] = self.panel.gain * data
+            segments[:, :, 1] = panel.gain * panel.AD2uV(wave.data)
             # add offsets:
             for chani, chan in enumerate(wave.chans):
-                xpos, ypos = self.panel.pos[chan]
+                xpos, ypos = panel.pos[chan]
                 segments[chani, :, 0] += xpos
                 segments[chani, :, 1] += ypos
         self.lc.set_segments(segments)
         self.chans = wave.chans
         if self.fill != None:
             self.fill.update(wave, tref)
+
+    def norm_wave(self, wave):
+        """Return wave with data normalized by Vpp of its max chan, subject to the current
+        channel and timepoint selection"""
+        panel = self.panel
+        ti0, ti1 = panel.sortwin.get_tis()
+        selchans = panel.chans_selected
+        chans = np.intersect1d(wave.chans, selchans) # overlapping set
+        if len(chans) == 0: # empty array, no overlap
+            chans = wave.chans # ignore selected chans
+        chanis = wave.chans.searchsorted(chans) # indices into data rows
+        seldata = wave.data[chanis, ti0:ti1] # selected part of the waveform
+        Vpp = seldata.ptp(axis=1).max() # Vpp chan with biggest Vpp
+        # For display, scale up by Vpp of the highest amplitude plotted neuron.
+        # This makes multiple neuron mean waveforms the same amplitude when plotted
+        # simultaneously, allowing visual comparison purely by shape:
+        neurons = panel.get_neurons() # neurons currently plotted
+        scales = []
+        for neuron in neurons:
+            nwave = neuron.wave
+            chans = np.intersect1d(nwave.chans, selchans) # overlapping set
+            if len(chans) == 0: # empty array, no overlap
+                chans = nwave.chans # ignore selected chans
+            chanis = nwave.chans.searchsorted(chans) # indices into data rows
+            selndata = nwave.data[chanis, ti0:ti1] # selected part of the waveform
+            scale = selndata.ptp(axis=1).max()
+            scales.append(scale)
+        if scales: # non-empty
+            scale = max(scales)
+        else: # no neuron plotted
+            scale = 150 # arbitrary value to scale to
+        wave.data = wave.data / Vpp * scale
+        if wave.std is not None:
+            ## TODO: since we don't have all the individual spike waveforms that what went
+            ## into calculating wave.data, and since std is a non-linear operation,
+            ## there's no easy way to update wave.std, so displayed error bars will not
+            ## take normalization into account and may be larger than they should be
+            pass
+        return wave
 
     def show(self, enable=True):
         """Show/hide LC"""
@@ -233,7 +270,7 @@ class Fill(object):
             x = []
             y = []
         else:
-            x = wave.ts-tref
+            x = wave.ts - tref
             lower = self.panel.gain * (data - err)
             upper = self.panel.gain * (data + err)
             for chani, chan in enumerate(wave.chans):
@@ -366,8 +403,7 @@ class PlotPanel(FigureCanvas):
             probe = self.stream.probe
         self.probe = probe
         self.SiteLoc = probe.SiteLoc # probe site locations with origin at center top
-        self.chans = probe.SiteLoc.keys()
-        self.chans.sort() # a sorted list of chans, keeps from having to do this over and over
+        self.chans = probe.chans # sorted array of chans
         self.nchans = probe.nchans
         self.chans_selected = [] # for clustering, or potentially other uses as well
 
@@ -375,7 +411,7 @@ class PlotPanel(FigureCanvas):
         siteloc = copy(self.SiteLoc) # lowercase means bottom origin
         ys = [ y for x, y in siteloc.values() ]
         maxy = max(ys)
-        for key, (x, y) in siteloc.iteritems():
+        for key, (x, y) in siteloc.items():
             y = maxy - y
             siteloc[key] = (x, y) # update
         self.siteloc = siteloc # center bottom origin
@@ -416,6 +452,14 @@ class PlotPanel(FigureCanvas):
         return self.spykewindow.sort
 
     sort = property(get_sort)
+
+    def get_neurons(self):
+        nids = []
+        for key in self.used_plots:
+            if key[0] == 'n':
+                nids.append(int(key[1:]))
+        neurons = [ self.sort.neurons[nid] for nid in nids ]
+        return neurons
 
     def get_tres(self):
         return self.stream.tres # overriden in SortPanel
@@ -461,7 +505,7 @@ class PlotPanel(FigureCanvas):
         elif ref == 'Caret':
             self._add_caret()
         else:
-            raise ValueError, 'invalid ref: %r' % ref
+            raise ValueError('invalid ref: %r' % ref)
 
     def show_ref(self, ref, enable=True):
         """Helper method for external use"""
@@ -474,20 +518,20 @@ class PlotPanel(FigureCanvas):
         elif ref == 'Caret':
             self._show_caret(enable)
         else:
-            raise ValueError, 'invalid ref: %r' % ref
+            raise ValueError('invalid ref: %r' % ref)
         self.draw_refs()
 
     def draw_refs(self):
         """Redraws all enabled reflines, resaves reflines_background"""
         plotvisibility = {} # mapping of currently shown plots to their visibility status
-        for pltid, plt in self.used_plots.iteritems():
+        for pltid, plt in self.used_plots.items():
             plotvisibility[pltid] = plt.visible()
             plt.hide()
         self.show_rasters(False)
         self.draw() # only draw all enabled refs - defined in FigureCanvas
         self.reflines_background = self.copy_from_bbox(self.ax.bbox) # update
         self.background = None # no longer valid
-        for pltid, plt in self.used_plots.iteritems():
+        for pltid, plt in self.used_plots.items():
             visible = plotvisibility[pltid]
             plt.show(visible) # re-show just the plots that were previously visible
             plt.draw()
@@ -626,29 +670,6 @@ class PlotPanel(FigureCanvas):
         self.qrplt.chans = chans
         self.qrplt.update_colours()
 
-    def get_spatialchans(self, order='vertical'):
-        """Return channels in spatial order.
-        order='vertical': sort from bottom to top, left to right
-        order='horziontal': sort from left to right, bottom to top
-        TODO: fix code duplication"""
-        if order == 'vertical':
-            # first, sort x coords, then y: (secondary, then primary)
-            xychans = [ (x, y, chan) for chan, (x, y) in self.siteloc.iteritems() ] # list of (x, y, chan) 3-tuples
-            xychans.sort() # stable sort in-place according to x values (first in tuple)
-            yxchans = [ (y, x, chan) for (x, y, chan) in xychans ]
-            yxchans.sort() # stable sort in-place according to y values (first in tuple)
-            chans = [ chan for (y, x, chan) in yxchans ] # unload the chan indices, now sorted bottom to top, left to right
-        elif order == 'horizontal':
-            # first, sort y coords, then x: (secondary, then primary)
-            yxchans = [ (y, x, chan) for chan, (x, y) in self.siteloc.iteritems() ] # list of (y, x, chan) 3-tuples
-            yxchans.sort() # stable sort in-place according to y values (first in tuple)
-            xychans = [ (x, y, chan) for (y, x, chan) in yxchans ] # list of (x, y, chan) 3-tuples
-            xychans.sort() # stable sort in-place according to x values (first in tuple)
-            chans = [ chan for (x, y, chan) in xychans ] # unload the chan indices, now sorted left to right, bottom to top
-        else:
-            raise ValueError
-        return chans
-
     def get_xy_um(self):
         """Pull xy tuples in um out of self.pos, store in (2 x nchans) array,
         in self.chans order. In chart and lfp panels, this is different from siteloc,
@@ -656,65 +677,39 @@ class PlotPanel(FigureCanvas):
         xy_um = np.asarray([ (self.us2um(self.pos[chan][0]), self.uv2um(self.pos[chan][1]))
                                   for chan in self.chans ]).T # x is row0, y is row1
         return xy_um
-    '''
-    def get_spatial_chan_array(self):
-        """build up 2d array of chanis, with cols and rows sorted according to probe layout"""
-        x, y = self.xy_um # in self.chans order
-        # should correspond to unique columns in spike frame, or just single column in chart or lfp frame
-        a = []
-        uniquexs = set(x)
-        for uniquex in uniquexs:
-            x == uniquexs
-    '''
+
     def get_closestchans(self, evt, n=1):
-        """Return n channels in column closest to mouse event coords,
-        sorted by vertical distance from mouse event"""
-
-        # sum of squared distances
-        #d2 = (x-xdata)**2 + (y-ydata)**2
-        #i = d2.argsort()[:n] # n indices sorted from smallest squared distance to largest
-
-        # what column is this event closest to? pick that column,
-        # and then the n vertically closest chans within it
+        """Return n closest channels to mouse event coords"""
         xdata = self.us2um(evt.xdata) # convert mouse event to um
         ydata = self.uv2um(evt.ydata)
         x, y = self.xy_um
+
+        # minimize Euclidean distance:
+        d2 = (x-xdata)**2 + (y-ydata)**2
+        i = d2.argsort()[:n] # n indices sorted from smallest squared distance to largest
+        chans = self.chans[i] # index into channels
+
+        # Alternate strategy: Return n channels in column closest to mouse event coords,
+        # sorted by vertical distance from mouse event:
+        # what column is this event closest to? pick that column,
+        # and then the n vertically closest chans within it
+        '''
         # find nearest column
         dx = np.abs(xdata - self.colxs) # array of x distances
         coli = dx.argmin() # index of column nearest to mouse click
         colx = self.colxs[coli] # x coord of nearest column
-        i, = (x == colx).nonzero() # indices into self.chans of chans that are in the nearest col
+        # indices into self.chans of chans that are in the nearest col:
+        i, = (x == colx).nonzero()
         colchans = np.asarray(self.chans)[i] # channels in nearest col
-        dy = np.abs(y[i] - ydata) # vertical distances between mouse click and all chans in this col
+        # vertical distances between mouse click and all chans in this col:
+        dy = np.abs(y[i] - ydata)
         i = dy.argsort()[:n] # n indices sorted from smallest to largest y distance
         chans = colchans[i] # index into channels in the nearest column
+        '''
+
         if len(chans) == 1:
             chans = chans[0] # pull it out, return a single value
         return chans
-
-    def get_closestline(self, evt):
-        """Return line that's closest to mouse event coords"""
-        d2s = [] # sum squared distances
-        hitlines = []
-        closestchans = self.get_closestchans(evt, n=NCLOSESTCHANSTOSEARCH)
-        for chan in closestchans:
-            line = self.qrplt.lines[chan]
-            if line.get_visible(): # only consider lines that are visible
-                hit, tisdict = line.contains(evt)
-                if hit:
-                    tis = tisdict['ind'] # pull them out of the dict
-                    xs = line.get_xdata()[tis]
-                    ys = line.get_ydata()[tis]
-                    d2 = (xs-evt.xdata)**2 + (ys-evt.ydata)**2
-                    d2 = d2.min() # point on line closest to mouse
-                    hitlines.append(line)
-                    d2s.append(d2)
-        d2s = np.asarray(d2s)
-        if d2s.size != 0:
-            linei = d2s.argmin() # index of line with smallest d2
-            return hitlines[linei]
-        else:
-            return None
 
     def plot(self, wave, tref=None):
         """Plot waveforms and optionally rasters wrt a reference time point"""
@@ -747,12 +742,7 @@ class PlotPanel(FigureCanvas):
         """Show/hide all rasters in this panel"""
         if self.rasters != None:
             self.rasters.show(enable)
-    '''
-    def _zoomx(self, x):
-        """Zoom x axis by factor x"""
-        self.spykewindow.usperum /= x
-        self.update_tw(self.tw[0]/x, self.tw[1]/x) # scale time window endpoints
-    '''
+
     def update_tw(self, tw):
         """Update tw and everything that depends on it"""
         self.tw = tw
@@ -806,7 +796,7 @@ class PlotPanel(FigureCanvas):
         Toggle specific chans on right click. On ctrl+left click, reset primary
         peak timepoint and maxchan of currently selected spike. On ctrl+right click,
         reset secondary peak timepoint"""
-        spw = self.topLevelWidget().parent() # spyke window
+        spw = self.spykewindow
         button = evt.button
         modifiers = QtGui.QApplication.keyboardModifiers()
         ctrl = modifiers == Qt.ControlModifier # only modifier is ctrl
@@ -823,21 +813,23 @@ class PlotPanel(FigureCanvas):
             if button == 1: # left click
                 # set t as primary peak and align selected spike to it, set maxchan
                 self.alignselectedspike('primary', t, chan)
-                self.spykewindow.seek(t) # seek to t
+                spw.seek(t) # seek to t
             elif button == 3: # right click
                 # designate t as secondary peak of selected spike
                 self.alignselectedspike('secondary', t)
-                self.spykewindow.seek(t) # seek to t
+                spw.seek(t) # seek to t
         else:
             if button == 1: # left click
-                self.spykewindow.seek(t) # seek to t
+                spw.seek(t) # seek to t
             elif button == 3: # right click
-                # toggle closest chan
-                if chan not in self.spykewindow.chans_enabled:
-                    enable = True
+                if spw.has_sort:
+                    print("Channel toggling is disabled when .sort is open")
                 else:
-                    enable = False
-                self.spykewindow.set_chans_enabled(chan, enable) # this calls self.set_chans()
+                    # toggle closest chan, but only when there's no sort:
+                    if chan not in spw.chans_enabled: # enable chan
+                        spw.chans_enabled = np.union1d(spw.chans_enabled, [chan])
+                    else: # disable chan
+                        spw.chans_enabled = np.setdiff1d(spw.chans_enabled, [chan])
 
     def alignselectedspike(self, peaktype, t, chan=None):
         """Align spike selected in sortwin to t, where t is designated as the
@@ -850,8 +842,8 @@ class PlotPanel(FigureCanvas):
         spikes = spw.sort.spikes
         try:
             sid = spw.GetSpike()
-        except RuntimeError, msg:
-            print(msg)
+        except RuntimeError as err:
+            print(err)
             return
         if peaktype == 'primary':
             spw.primarypeakt = t
@@ -874,8 +866,8 @@ class PlotPanel(FigureCanvas):
         AD2uV = sort.converter.AD2uV
         try:
             sid = spw.GetSpike()
-        except RuntimeError, msg:
-            print(msg)
+        except RuntimeError as err:
+            print(err)
             return
         abort = False
         try:
@@ -947,16 +939,20 @@ class PlotPanel(FigureCanvas):
         """Pop up a tooltip when mouse is within PICKTHRESH of a line"""
         tooltip = self.GetToolTip()
         if evt.mouseevent.inaxes:
-            line = evt.artist # assume it's one of our SpykeLines, since those are the only ones with their .picker attrib enabled
+            # assume it's one of our SpykeLines, since those are the only ones with their
+            # .picker attrib enabled:
+            line = evt.artist
             chan = line.chan
             xpos, ypos = self.pos[chan]
-            t = evt.mouseevent.xdata - xpos + self.qrplt.tref # undo position correction and convert from relative to absolute time
+            # undo position correction and convert from relative to absolute time:
+            t = evt.mouseevent.xdata - xpos + self.qrplt.tref
             v = (evt.mouseevent.ydata - ypos) / self.gain
             if t >= self.stream.t0 and t <= self.stream.t1: # in bounds
-                t = int(round(t / self.stream.tres)) * self.stream.tres # round to nearest (possibly interpolated) sample
+                # round to nearest (possibly interpolated) sample:
+                t = intround(t / self.stream.tres) * self.stream.tres
                 tip = 'ch%d\n' % chan + \
-                      't=%d %s\n' % (t, MICRO+'s') + \
-                      'V=%.1f %s\n' % (v, MICRO+'V') + \
+                      't=%d %s\n' % (t, 'us') + \
+                      'V=%.1f %s\n' % (v, 'uV') + \
                       'window=(%.3f, %.3f) ms' % (self.tw[0]/1000, self.tw[1]/1000)
                 tooltip.SetTip(tip)
                 tooltip.Enable(True)
@@ -993,10 +989,10 @@ class PlotPanel(FigureCanvas):
                 self.setToolTip('')
                 return
             tres = self.stream.tres
-        t = int(round(t / tres)) * tres # nearest sample
-        tip = 'ch%d @ %r %s\n' % (chan, self.SiteLoc[chan], MICRO+'m') + \
-              't=%d %s\n' % (t, MICRO+'s') + \
-              'V=%.1f %s\n' % (v, MICRO+'V') + \
+        t = intround(t / tres) * tres # nearest sample
+        tip = 'ch%d @ %r %s\n' % (chan, self.SiteLoc[chan], 'um') + \
+              't=%.1f %s\n' % (t, 'us') + \
+              'V=%.1f %s\n' % (v, 'uV') + \
               'window=(%.3f, %.3f) ms' % (self.tw[0]/1000, self.tw[1]/1000)
         self.setToolTip(tip)
 
@@ -1019,6 +1015,7 @@ class PlotPanel(FigureCanvas):
                 self.gain = self.gain * (1 + absdi / SCALEX)
             else:
                 self.gain = self.gain / (1 + absdi / SCALEX)
+            print('%s window gain=%g' % (wintype, self.gain))
         elif shift: # scale time
             if sign == 1:
                 tw = tuple([t / (1 + absdi / SCALEX) for t in self.tw])
@@ -1026,12 +1023,11 @@ class PlotPanel(FigureCanvas):
                 tw = tuple([t * (1 + absdi / SCALEX) for t in self.tw])
             self.update_tw(tw) # update Panel display tw
             spw.__dict__[wintype2wintw[wintype]] = tw # update spyke window's data fetch tw
+            print('%s window tw=(%g, %g) ms' % (wintype, self.tw[0]/1000, self.tw[1]/1000))
         else: # step left/right on wheel up/down
             win = self.parent()
             win.step(-di)
         spw.plot(wintypes=[wintype])
-        print('%s window gain=%g, tw=(%g, %g) ms' %
-              (wintype, self.gain, self.tw[0]/1000, self.tw[1]/1000))
 
 
 class SpikePanel(PlotPanel):
@@ -1044,34 +1040,25 @@ class SpikePanel(PlotPanel):
         PlotPanel.__init__(self, *args, **kwargs)
 
     def do_layout(self):
-        # ordered left to right, bottom to top:
-        self.hchans = self.get_spatialchans('horizontal')
-        # ordered bottom to top, left to right
-        self.vchans = self.get_spatialchans('vertical')
-        #print('horizontal ordered chans in Spikepanel:\n%r' % self.hchans)
+        # chans ordered bottom to top, then left to right:
+        hchans = self.probe.chans_btlr
+        # chans ordered left to right, then bottom to top
+        vchans = self.probe.chans_lrbt
+        #print('horizontal ordered chans in Spikepanel:\n%r' % hchans)
         # x origin is somewhere in between the xlimits. xlimits are asymmetric
         # if self.tw is asymmetric:
-        self.ax.set_xlim(self.um2us(self.siteloc[self.hchans[0]][0]) + self.tw[0],
-                         self.um2us(self.siteloc[self.hchans[-1]][0]) + self.tw[1])
-        self.ax.set_ylim(self.um2uv(self.siteloc[self.vchans[0]][1]) - CHANVBORDER,
-                         self.um2uv(self.siteloc[self.vchans[-1]][1]) + CHANVBORDER)
+        self.ax.set_xlim(self.um2us(self.siteloc[hchans[0]][0]) + self.tw[0],
+                         self.um2us(self.siteloc[hchans[-1]][0]) + self.tw[1])
+        self.ax.set_ylim(self.um2uv(self.siteloc[vchans[0]][1]) - CHANVBORDER,
+                         self.um2uv(self.siteloc[vchans[-1]][1]) + CHANVBORDER)
         colourgen = itertools.cycle(iter(PLOTCOLOURS))
-        for chan in self.vchans:
+        for chan in vchans:
             # chan order doesn't matter for setting .pos, but it does for setting .colours
             self.pos[chan] = (self.um2us(self.siteloc[chan][0]),
                               self.um2uv(self.siteloc[chan][1]))
             # assign colours so that they cycle vertically in space:
-            self.vcolours[chan] = colourgen.next()
-    '''
-    def _zoomx(self, x):
-        """Zoom x axis by factor x"""
-        PlotPanel._zoomx(self, x)
-        # update main spyke frame so its plot calls send the right amount of data
-        self.spykewindow.spiketw = self.tw
-        self.spykewindow.frames['chart'].panel.cw = self.tw # update caret width
-        self.spykewindow.frames['chart'].panel._update_caret_width()
-        self.spykewindow.plot(frametypes='spike') # replot
-    '''
+            self.vcolours[chan] = next(colourgen)
+
     def _add_caret(self):
         """Disable for SpikePanel"""
         pass
@@ -1096,31 +1083,23 @@ class ChartPanel(PlotPanel):
 
     def do_layout(self):
         """Sets axes limits and calculates self.pos"""
-        self.vchans = self.get_spatialchans('vertical') # ordered bottom to top, left to right
+        # chans ordered left to right, then bottom to top:
+        vchans = self.probe.chans_lrbt
         self.ax.set_xlim(0 + self.tw[0], 0 + self.tw[1]) # x origin at center
-        miny = self.um2uv(self.siteloc[self.vchans[0]][1])
-        maxy = self.um2uv(self.siteloc[self.vchans[-1]][1])
+        miny = self.um2uv(self.siteloc[vchans[0]][1])
+        maxy = self.um2uv(self.siteloc[vchans[-1]][1])
         # average vertical spacing between chans, in uV:
         ngaps = max(self.nchans-1, 1) # at least 1
         vspace = (maxy - miny) / ngaps
         self.ax.set_ylim(miny - CHANVBORDER, maxy + CHANVBORDER)
         colourgen = itertools.cycle(iter(PLOTCOLOURS))
-        for chani, chan in enumerate(self.vchans):
+        for chani, chan in enumerate(vchans):
             #self.pos[chan] = (0, self.um2uv(self.siteloc[chan][1])) # x=0 centers horizontally
             # x=0 centers horizontally, equal vertical spacing:
             self.pos[chan] = (0, chani*vspace)
             # assign colours so that they cycle vertically in space:
-            self.vcolours[chan] = colourgen.next()
-    '''
-    def _zoomx(self, x):
-        """Zoom x axis by factor x"""
-        PlotPanel._zoomx(self, x)
-        # update main spyke frame so its plot calls send the right amount of data
-        self.spykewindow.charttw = self.tw
-        self.spykewindow.frames['lfp'].panel.cw = self.tw # update caret width
-        self.spykewindow.frames['lfp'].panel._update_caret_width()
-        self.spykewindow.plot(frametypes='chart') # replot
-    '''
+            self.vcolours[chan] = next(colourgen)
+
     def _add_vref(self):
         """Disable for ChartPanel"""
         pass
@@ -1165,37 +1144,25 @@ class LFPPanel(ChartPanel):
         """This is only necessary for SurfStream, which has a .layout attrib, and only to
         prevent plotting vref lines for chans that don't exist in the LFP"""
         ChartPanel.do_layout(self)
-        # Need to get a list of keys, not an iterator, since self.pos dict can change size
-        # during iteration:
         try: self.stream.layout
         except AttributeError: return
-        for chan in list(self.pos):
-            if chan not in self.stream.layout.chans:
-                del self.pos[chan] # remove siteloc chans not in lowpassmultichan record
-                try:
-                    self.chans.remove(chan) # in place
-                except ValueError: # already removed from list on previous do_layout() call
-                    pass
+        newchans, newpos = [], {}
+        for chan in self.stream.layout.chans:
+            newchans.append(chan)
+            newpos[chan] = self.pos[chan]
+        self.chans = np.asarray(newchans)
+        self.pos = newpos
 
     def set_chans(self, chans):
-        """This is only necessary for SurfStream, which has a .layout attrib.
-        Reset chans for this LFPPanel, triggering colour update.
-        Take intersection of lpstream.layout.chans and chans_enabled,
-        conserving order in lpstream.layout.chans"""
-        ## TODO: LFP chan become incorrectly coloured for non-surf files when channels are
-        ## disabled, probably has to do with this:
-        try: self.stream.layout
-        except AttributeError: return
-        chans = [ chan for chan in self.stream.layout.chans if chan in chans ]
+        """Reset chans for this LFPPanel, triggering colour update. Take intersection of
+        stream file's channels and chans, conserving order in stream file's channels.
+        This overloads ChartPanel.set_chans only to handle the special case of .srf LFP"""
+        stream = self.stream
+        if stream.ext == '.srf': # single or MultiStream .srf
+            streamfilechans = stream.layout.chans # SurfStream should have a layout attrib
+            chans = [ chan for chan in streamfilechans if chan in chans ]
         ChartPanel.set_chans(self, chans)
-    '''
-    def _zoomx(self, x):
-        """Zoom x axis by factor x"""
-        PlotPanel._zoomx(self, x)
-        # update main spyke frame so its plot calls send the right amount of data
-        self.spykewindow.lfptw = self.tw
-        self.spykewindow.plot(frametypes='lfp') # replot
-    '''
+
     def _add_vref(self):
         """Override ChartPanel"""
         PlotPanel._add_vref(self)
@@ -1399,6 +1366,11 @@ class SortPanel(PlotPanel):
         self.qrplt = None # qrplt set in addItems is no longer quickly removable
         self.blit(self.ax.bbox) # blit everything to screen
 
+    def updateAllItems(self):
+        """Shortcut for updating all items in used_plots"""
+        items = list(self.used_plots) # dict keys are plot ids
+        self.updateItems(items)
+
     def updateItems(self, items):
         """Re-plot items, potentially because their WaveForms have changed.
         Typical use case: spike is added to a neuron, neuron's mean waveform has changed"""
@@ -1419,11 +1391,6 @@ class SortPanel(PlotPanel):
             self.background = None
             self.qrplt = None # qrplt set in addItems is no longer quickly removable
         self.blit(self.ax.bbox) # blit everything to screen
-
-    def updateAllItems(self):
-        """Shortcut for updating all items in used_plots"""
-        items = list(self.used_plots) # dict keys are plot ids
-        self.updateItems(items)
 
     def updateItem(self, item):
         """Update and draw an item's plot"""

@@ -103,7 +103,8 @@ class GLWidget(QtOpenGL.QGLWidget):
     def initializeGL(self):
         GL.glClearColor(0.0, 0.0, 0.0, 1.0) # same as default
         GL.glClearDepth(1.0) # same as default
-        GL.glEnable(GL.GL_DEPTH_TEST) # display points according to occlusion, not order of plotting
+        # display points according to occlusion, not order of plotting:
+        GL.glEnable(GL.GL_DEPTH_TEST)
         #GL.glEnable(GL.GL_POINT_SMOOTH) # doesn't seem to work right, proper way to antialiase?
         #GL.glEnable(GL.GL_LINE_SMOOTH) # works better
         #GL.glPointSize(1.5) # truncs to the nearest pixel if antialiasing is off
@@ -136,9 +137,11 @@ class GLWidget(QtOpenGL.QGLWidget):
         # color arrays?
 
         #GL.glFlush() # forces drawing to begin, only makes difference for client-server?
-        self.swapBuffers() # doesn't seem to be necessary, even though I'm in double-buffered
-                           # mode with the back buffer for RGB sid encoding, but do it anyway
-                           # for completeness
+
+        # doesn't seem to be necessary, even though double-buffered mode is set with the
+        # back buffer for RGB sid encoding. In fact, swapBuffers() call seems to cause
+        # flickering, so leave disabled:
+        #self.swapBuffers()
 
         # print the modelview matrix
         #print(self.MV)

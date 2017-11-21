@@ -1,15 +1,39 @@
-- try memmaping the .wave file to save RAM
-    - open in copy-on-write mode in np.load(mmap_mode='c')?
-    - worry about how shifted waveforms are resaved to disk on demand. Does the memmap need to be closed first, save with np.save, then reopen memmap with np.load()?
+- KiloSort detects the transients at border between time gap and actual data as spikes. These big transients are due to filtering that it applies to raw data (and are also visible in spyke with filtering enabled). Maybe when exporting raw data, we should actually process it slightly by smoothing the blank period with actual data. This would probably be preferable to excluding all spikes from kilosort around the first/last 5 ms of data of each recording, because KiloSort will make wasteful templates for these huge transients. The smoothing could simply be a linear ramp, just to make it clear that it isn't real data, but also make it smooth enough that it isn't likely to be detected as spike by KiloSort
+    - the smoothest ramp of all would be from the last sample of the previous recording to the first sample of the next recording
+    - KiloSort seems to ignore the first and last filtering artifacts, that must be hard-coded
 
-- also add CAR to SurfStream and SimpleStreams, and also to lowpass streams
+- parallelize spatial fit when importing from events.zip, which is what happens automatically during spyke's built-in detection
 
-- do proper low pass filtering (not just decimation) to get LFP data from wideband data
-    - when exporting to lfp.zip, do slicing and filtering and decimation in the same 10 sec chunks of wideband data as spike detection, to avoid memory errors
+- check for spike normalization flag when calculating RMS error during best fit alignment
+
+- add option to scatter points along time axis in cluster plot, to reduce artifactual clustering in time due to recording time gaps, or sparse firing - this should create bridges across the time gaps, and make gac clustering over time work better.
+    - scatter by some percentage of the full time range currently plotted? sample from a gaussian with a sigma of about 2% of the full time range?
+
+- add zeros to start of all exported .dat files and set offset field to 0 in .json
+    - do this only for ns6 files? would be undesireable for .srf files because they can have long periods where timer is running before saving to disk actually starts
+
+- BUG: after opening a .track file with disabled chans, and then opening a .sort file that came from that track, the disabled chans are re-enabled, even though the spike waveforms for detected spikes still show disabled chans (as they should)
+
+- add gui option to export raw data in chan order or spatial order, default to chan order
+    - also update "chan_order" field appropriately in .json file
+
+- make KiloSort check if .dat file size is an integer multiple of ntot chans declared in ks_run.m file, or is that ignored? Shouldn't be, because only ephys chans are defined in the chanmap file!
+
+- BUG: on osx, it seems that glwidget.paintgl is called immediately during initialization of the glwidget, which fails because certain properties (.colours, .points, etc) haven't been set yet. Maybe there's some flag that needs to be set in osx to prevent auto painting on init? Or maybe somehow those properties (set in .plot()) need to be set sooner? Maybe do a blank .plot() call early on?
+
+- BUG: shouldn't chans be coloured top to bottom starting with red? Seems they're coloured bottom to top starting with red
+
+- add CAR to lowpass streams, SurfStream and SimpleStreams
 
 - do whitening of raw data? done by Kilosort and spyking-circus
 
-- add t-SNE as a dimension reduction method
+- add export of .clu, .spk and .res files
+
+- add CTRL+R shortcut for spike waveform reload
+
+- try memmaping the .wave file to save RAM
+    - open in copy-on-write mode in np.load(mmap_mode='c')?
+    - worry about how shifted waveforms are resaved to disk on demand. Does the memmap need to be closed first, save with np.save, then reopen memmap with np.load()?
 
 - BUG: in some cases when opening streams and/or sorts of one polytrode layout, closing them, then opening one of another layout, the displayed channel arrangement in at least the sort window is wrong, or you might get a KeyError while trying to index into a channel that doesn't exist, because the new layout has fewer channels than the old one
 
@@ -1379,6 +1403,41 @@ rename MEANWAVESAMPLESIZE to MEANWAVEMAXSAMPLES, set to 2000, and subsample by s
 - add "common average referencing" cited in Kilosort paper, ref: Ludwig...Kipke, 2009, J Neurophysiol
 - on delete key press in cluster and sort windows, if any spikes are explicitly selected, remove only them, otherwise remove selected neuron(s)
 - on ESC, if one of the selected clusters is cluster 0, deselect that one first
+- subtract about 100 us from all spike times imported from KiloSort (during import of the .events.zip file, not during its creation) to make up for essentially all spikes being centered too far to the left initially, until manually shifted. This would save on waveform reload time after manual shift
+- do proper low pass filtering (not just decimation) to get LFP data from wideband data
+    - when exporting to lfp.zip, do slicing and filtering and decimation in the same 10 sec chunks of wideband data as spike detection, to avoid memory errors
+- exporting from .track file to .dat file results in unsupported error
+- fix folder generation on export of .dat or envl.dat files, each .dat file shouldn't have its own folder, only one folder per track/series
+- add a .json file to go with each .ns6 file, or a special one for a whole .ns6 series, to just describe chan layout
+- add source filename(s) to notes field when exporting to .dat. This should be not just for raw export, all kinds of export to .dat (high-pass, low-pass, and envelope).
+- sort entire tracks with ks: add option to export single concatenated raw .dat file from either .ns6 or individual .dat files in a .track file, probably with zeros to fill in recording gaps. Then importing the spike times should work seamlessly, i.e. the spike would be relative to t=0 of the first recording, just like when detection and sorting are done entirely within spyke
+- Nope, this seems like too much extension appending, and doesn't really gain anything:
+    - for data exported to .dat, should files be named e.g. .ns6.dat, to help indicate that they came from an .ns6 file instead of being directly recorded to .dat? This would be in addition to the note in the .json file. This would also mean the json file would be named .ns6.dat.json.
+- Nope, not necessary: add support for .series file? would be identical to .track file
+- add progress indication to spatial fit step during import of spike times
+- spikes rejected on import should get a raster line anyway (they currently do not), so we can fairly evaluate which spikes KiloSort missed.
+- KiloSort fails to run when nchans is less than the full set, as exported by spyke in the chanmap .mat file
+    - I think the chanMap variable needs to be contiguous from 1 to nchans, and then the xcoords/ycoords/kcoords vars need to be just the right ones, i.e. leave out the coords of the excluded chans
+- make KiloSort always export to datfilename.ks or datfilename.kilosort or datfilename.ks_results folder in same folder as the source data, so that KiloSort results from different source files in the same folder don't conflict with each other
+- in export_raw_dat, also write ks_run and ks_config files, with appropriate values filled in
+- NOPE: add menu option to only export the 3 KiloSort files
+- add menu option "New track" which asks for a folder, looks for all .ns6 files in that folder (or failing that, all .dat files), and takes those names and generates a .track file using them
+    - then the user can open the .track file and export raw to .dat for ks
+    - this way the user is also forced to use the GUI and briefly inspect the data before exporting to .dat for ks, and also to see if certain channels should be disabled
+- add "Save track channels" menu item to save enabled chan selection to comment in .track file
+- reduce default include radius to 100 um to limit the number of channels per spike, and therefore keep memory usage under control, especially for sorts with increasingly high spike counts
+- test running KiloSort on .dat with missing channels (e.g. due to disabling dead channels before export)
+    - chanmap.mat will have to reflect the correct chans - this is now done on KiloSort matlab file export
+- BUG: when inputting a timepoint to jump to in the timepoint field, sometimes the slider position isn't updated
+- BUG: for recordings with an adapter, lowpass chans have the wrong colour, and change colour when chans are enabled/disabled
+- BUG: loading .track, then .sort re-enables disabled chans?
+- disable ability to toggle channels in raw data panels when an existing sort is open
+- BUG: round-trip results in loss of one uninterpolated datapoint
+    - exporting two files to concatenated output gives a missing datapoint at end of both files, and therefore an extra datapoint of 0s at the end of the concatenated file, so the multistream is correctly calculating the size of the final file, but when getting data from the individual streams, it gets one datapoint less
+    - concatenating .srf files to .dat doesn't seem to have this problem, probably because tres is in multiples of 1 us
+- add t-SNE as a dimension reduction method
+- add a mode that normalizes spike amplitudes temporarily, according to amplitude of each spike's max chan, both for waveform display and clustering
+    - this would allow the user to remove spike amplitude from affecting clustering, which would now only rely on spike shape and spatial distribution, and would allow for better handling of bursts (assuming spike shape doesn't change much during a burst)
 
 
 

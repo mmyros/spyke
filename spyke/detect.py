@@ -5,12 +5,6 @@ from __future__ import print_function
 
 __authors__ = ['Martin Spacek', 'Reza Lotun']
 
-# this stuff needs to be near the top apparently
-import numpy as np
-import pyximport
-pyximport.install(build_in_temp=False, inplace=True)
-import util # .pyx file
-
 import sys
 import time
 import logging
@@ -42,8 +36,14 @@ IOError: [Errno 4] Interrupted system call
 
 which has to be caught and retried using _eintr_retry_call.
 '''
-from core import eucd, dist, unsortedis, concatenate_destroy, intround
-import stream
+import numpy as np
+
+import pyximport
+pyximport.install(build_in_temp=False, inplace=True)
+from . import util # .pyx file
+
+from . import stream
+from .core import eucd, dist, unsortedis, concatenate_destroy, intround
 
 #DMURANGE = 0, 500 # allowed time difference between peaks of modelled spike
 
@@ -65,8 +65,8 @@ def _eintr_retry_call(func, *args):
     while True:
         try:
             return func(*args)
-        except (OSError, IOError), e:
-            if e.errno == errno.EINTR:
+        except (OSError, IOError) as err:
+            if err.errno == errno.EINTR:
                 continue
             raise
 
@@ -83,7 +83,7 @@ def initializer(detector):
     
 def calc_SPIKEDTYPE(maxnchansperspike):
     """Create spike array dtype for efficiently storing information about each spike"""
-    ## NOTE: with uint8, the current channel ID limit is 0 to 255
+    ## NOTE: with uint8, the current channel ID limit is 0 to 255, but nchans limit is 255
     ##       with int16, the current neuron ID limit is -32768 to 32767
     dt = [('id', np.int32), ('nid', np.int16),
           ('chan', np.uint8), ('nchans', np.uint8),
@@ -143,10 +143,10 @@ class DistanceMatrix(object):
     .chans and .coords"""
     def __init__(self, SiteLoc):
         """SiteLoc is a dictionary of (x, y) tuples, with chans as the keys. See probes.py"""
-        chans_coords = SiteLoc.items() # list of (chan, coords) tuples
+        chans_coords = list(SiteLoc.items()) # list of (chan, coords) tuples
         chans_coords.sort() # sort by chan
         # pull out the sorted chans:
-        self.chans = np.uint8([ chan_coord[0] for chan_coord in chans_coords ])
+        self.chans = np.asarray([ chan_coord[0] for chan_coord in chans_coords ])
         # pull out the coords, now in chan order:
         self.coords = [ chan_coord[1] for chan_coord in chans_coords ]
         self.data = eucd(self.coords)
@@ -179,8 +179,7 @@ class Detector(object):
         return self._chans
 
     def set_chans(self, chans):
-        chans.sort() # ensure they're always sorted
-        self._chans = np.int8(chans) # ensure they're always int8
+        self._chans = np.sort(chans) # ensure they're always a sorted array
 
     chans = property(get_chans, set_chans)
 
@@ -301,6 +300,7 @@ class Detector(object):
 
         spikes = concatenate_destroy(spikes)
         wavedata = concatenate_destroy(wavedata) # along sid axis, other dims are identical
+        print('wavedata.shape:', wavedata.shape)
         self.nspikes = len(spikes)
         assert len(wavedata) == self.nspikes
         # default -1 indicates no nid is set as of yet, reserve 0 for actual ids
@@ -337,7 +337,7 @@ class Detector(object):
         maxnchansperspike = 0
         for chani, distances in enumerate(self.dm.data): # iterate over rows of distances
             # at what col indices does the returned row fall within inclr?:
-            inclchanis, = np.uint8(np.where(distances <= self.inclr))
+            inclchanis, = np.where(distances <= self.inclr)
             self.inclnbhdi[chani] = inclchanis
             maxnchansperspike = max(maxnchansperspike, len(inclchanis))
         self.maxnchansperspike = maxnchansperspike
@@ -697,7 +697,8 @@ class Detector(object):
                 lockchaniis = ylockchaniis.copy()
                 for ylockchanii in ylockchaniis:
                     if dist((x[ylockchanii], y[ylockchanii]), (x0, y0)) > lockr:
-                        lockchaniis = np.delete(lockchaniis, ylockchanii) # dist is too great
+                        # Euclidean distance is too great, remove ylockchanii from lockchaniis:
+                        lockchaniis = lockchaniis[lockchaniis != ylockchanii]
                 lockchans = inclchans[lockchaniis]
                 lockchanis = inclchanis[lockchaniis]
                 nlockchans = len(lockchans)
@@ -774,7 +775,7 @@ class Detector(object):
             # randomly sample self.fixednoisewin's worth of data from self.trange in
             # blocks of self.blocksize, without replacement
             tload = time.time()
-            print('loading data to calculate noise')
+            print('Loading data to calculate noise')
             if self.fixednoisewin >= abs(self.trange[1] - self.trange[0]):
                 # sample width meets or exceeds search trange
                 blockranges = [self.trange] # use a single block of data, as defined by trange

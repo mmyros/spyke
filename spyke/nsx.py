@@ -15,12 +15,12 @@ import numpy as np
 import os
 from struct import unpack
 import datetime
-from collections import OrderedDict as odict
 import json
 
-from core import NULL, rstripnonascii, intround
-import dat # for inheritance
-from stream import NSXStream
+from .core import NULL, rstripnonascii, intround, write_dat_json
+from . import dat # for inheritance
+from .stream import NSXStream
+from . import probes
 
 
 class File(dat.File):
@@ -51,13 +51,11 @@ class File(dat.File):
             self.parse()
         self.load()
 
-    def parse(self):
-        self._parseFileHeader()
-
     def _parseFileHeader(self):
         """Parse the file header"""
         self.fileheader = FileHeader()
         self.fileheader.parse(self.f)
+        self.fileheader.parse_json(self.f)
         #print('Parsed fileheader')
 
     def load(self):
@@ -71,88 +69,75 @@ class File(dat.File):
         self.datapacket = datapacket
         self.contiguous = True
 
-    def export_dat(self, dt=None):
-        """Export contiguous data packet to .dat file, in the original (ti, chani) order
-        using same base file name in the same folder. Also export companion .json metadata
-        file. dt is duration to export from start of recording, in sec"""
-        if dt == None:
-            nt = self.nt
-            dtstr = ''
+    def chan2datarowi(self, chan):
+        """Find row in self.datapacket._data corresponding to chan.
+        chan can be either an integer id or a string label"""
+        allchansrowis, = np.where(chan == self.fileheader.allchans)
+        alllabelrowis, = np.where(chan == self.fileheader.alllabels)
+        datarowis = np.concatenate([allchansrowis, alllabelrowis])
+        if len(datarowis) == 0:
+            raise ValueError("Can't find chan %r" % chan)
+        elif len(datarowis) > 1:
+            raise ValueError("Found multiple occurences of chan %r at data rows %r"
+                             % (chan, datarowis))
+        return datarowis[0]
+
+    def getchantype(self, chan):
+        """Return the type ('ephys' or 'aux') of chan. chan can be either an integer id
+        or a string label."""
+        chantypes = []
+        fh = self.fileheader
+        if chan in fh.chans or chan in fh.ephyschanlabels:
+            chantypes.append('ephys')
+        if chan in fh.auxchans or chan in fh.auxchanlabels:
+            chantypes.append('aux')
+        if len(chantypes) == 0:
+            raise ValueError("Can't find chan %r" % chan)
+        elif len(chantypes) > 1:
+            raise ValueError("Found mutliple types for chan %r: %r" % (chan, chantypes))
+        return chantypes[0]
+
+    def getchanAD(self, chan):
+        """Return AD data for a single chan. chan can be either an integer id
+        or a string label. To convert to voltage, use the appropriate multiplier
+        (AD2uVx for ephys chans, AD2mVx for aux chans)"""
+        datarowi = self.chan2datarowi(chan)
+        return self.datapacket._data[datarowi]
+
+    def getchanV(self, chan):
+        """Return data for a single chan, in volts. chan can be either an integer id
+        or a string label"""
+        AD = self.getchanAD(chan)
+        chantype = self.getchantype(chan)
+        if chantype == 'ephys':
+            return AD * self.fileheader.AD2uVx / 1000000 # convert uV to V
+        elif chantype == 'aux':
+            return AD * self.fileheader.AD2mVx / 1000 # convert mV to V
         else:
-            nt = intround(dt * self.fileheader.sampfreq)
-            dtstr = str(dt)
-        assert self.is_open()
-        fh = self.fileheader
-        nbytes = nt * fh.nchanstotal * 2 # number of bytes requested, 2 bytes per datapoint
-        offset = self.datapacket.dataoffset
-        self.f.seek(offset)
-        basefname = os.path.splitext(self.fname)[0]
-        if dtstr:
-            basefname = '%s_%ss' % (basefname, dtstr)
-        datfname = basefname + '.dat'
-        jsonfname = datfname + '.json'
-        fulldatfname = self.join(datfname)
-        fulljsonfname = self.join(jsonfname)
-
-        # export .dat file:
-        print('writing raw ephys data to %r' % fulldatfname)
-        print('starting from dataoffset at %d bytes' % offset)
-        with open(fulldatfname, 'wb') as datf:
-            datf.write(self.f.read(nbytes))
-        nbyteswritten = self.f.tell() - offset
-        print('%d bytes written' % nbyteswritten)
-        print('%d attempted, %d actual timepoints written'
-              % (nt, nbyteswritten / fh.nchanstotal / 2))
-
-        # export companion .json metadata file:
-        od = odict()
-        fh = self.fileheader
-        od['nchans'] = fh.nchanstotal
-        od['sample_rate'] = fh.sampfreq
-        od['dtype'] = 'int16' # hard-coded, only dtype supported for now
-        od['uV_per_AD'] = fh.AD2uVx
-        od['chan_layout_name'] = self.hpstream.probe.name
-        od['chans'] = list(fh.chans)
-        od['aux_chans'] = list(fh.auxchans)
-        od['nsamples_offset'] = self.t0i
-        od['datetime'] = fh.datetime.isoformat()
-        od['author'] = ''
-        od['version'] = '' # no way to extract Blackrock NSP version from .nsx?
-        od['notes'] = fh.comment
-        with open(fulljsonfname, 'w') as jsonf:
-            ## TODO: make list fields not have a newline for each entry
-            json.dump(od, jsonf, indent=0) # write contents of odict to file
-            jsonf.write('\n') # end with a blank line
-        print('wrote metadata file %r' % fulljsonfname)
-
-        # print the important metadata:
-        print('total chans: %d' % fh.nchanstotal)
-        print('ephys chans: %d' % fh.nchans)
-        print('sample rate: %d Hz' % fh.sampfreq)
-        print('voltage gain: %g uV/AD' % fh.AD2uVx)
-        print('chan layout: %s' % self.hpstream.probe.name)
+            raise ValueError('Unknown chantype %r' % chantype)
 
 
-class FileHeader(object):
+class FileHeader(dat.FileHeader):
     """.nsx file header. Takes an open file, parses in from current file
     pointer position, stores header fields as attribs"""
-
     def __len__(self):
         return self.nbytes
 
     def parse(self, f):
         # "basic" header:
         self.offset = f.tell()
-        self.filetype = f.read(8)
+        self.filetype = f.read(8).decode()
         assert self.filetype == 'NEURALCD'
         self.version = unpack('BB', f.read(2)) # aka "File Spec", major and minor versions
         self.nbytes, = unpack('I', f.read(4)) # length of full header, in bytes
-        self.label = f.read(16).rstrip(NULL) # sampling group label, null terminated
-        self.comment = rstripnonascii(f.read(256)) # null terminated, trailing junk bytes (bug)
+        self.label = f.read(16).rstrip(NULL).decode() # sampling group label, null terminated
+        # null terminated, trailing junk bytes (bug):
+        self.comment = rstripnonascii(f.read(256)).decode()
         # "Period" wrt sampling freq; sampling freq in Hz:
         self.decimation, self.sampfreq = unpack('II', f.read(8))
-        assert self.decimation == 1 # doesn't have to be, but probably should for neural data
-        self.tres = 1 / self.sampfreq * 1e6 # float us
+        if self.decimation != 1: # doesn't have to be, but probably should for neural data
+            print('WARNING: data is decimated by a factor of %d' % self.decimation)
+        self.tres = self.decimation / self.sampfreq * 1e6 # float us
         #print('FileHeader.tres = %f' % self.tres)
 
         # date and time corresponding to t=0:
@@ -171,7 +156,7 @@ class FileHeader(object):
             chanheader.parse(f)
             label, id = chanheader.label, chanheader.id
             if label != ('chan%d' % id):
-                print('excluding chan%d (%r) as auxiliary channel' % (id, label))
+                print('Treating chan%d (%r) as auxiliary channel' % (id, label))
                 self.auxchanheaders[id] = chanheader
             else: # save ephys channel
                 self.chanheaders[id] = chanheader
@@ -179,39 +164,132 @@ class FileHeader(object):
         self.nauxchans = len(self.auxchanheaders) # number of aux chans
         assert self.nchans + self.nauxchans == self.nchanstotal
         if self.nauxchans > 0: # some chans were aux chans
-            print('excluded %d auxiliary channels' % (self.nauxchans))
+            print('Found %d auxiliary channels' % (self.nauxchans))
         assert len(self) == f.tell() # header should be of expected length
+
+        # if there's no adapter, AD ephys chans == probe chans:
         self.chans = np.asarray(sorted(self.chanheaders)) # sorted array of keys
         self.auxchans = np.asarray(sorted(self.auxchanheaders)) # sorted array of keys
-        if len(self.auxchans) > 0:
+        if len(self.chans) > 0 and len(self.auxchans) > 0:
             # ensure that the last ephys chan comes before the first aux chan:
             assert self.chans[-1] < self.auxchans[0]
 
-        # check AD2uV params of all ephys chans:
-        c0 = self.chanheaders[self.chans[0]] # reference channel for comparing AD2uV params
-        assert c0.units == 'uV' # assumed later during AD2uV conversion
-        assert c0.maxaval == abs(c0.minaval) # not strictly necessary, but check anyway
-        assert c0.maxdval == abs(c0.mindval)
-        ref = c0.units, c0.maxaval, c0.minaval, c0.maxdval, c0.mindval
-        for c in self.chanheaders.values():
-            if (c.units, c.maxaval, c.minaval, c.maxdval, c.mindval) != ref:
-                raise ValueError('not all chans have the same AD2uV params')
-        # calculate AD2uV conversion factor:
-        self.AD2uVx = (c0.maxaval-c0.minaval) / float(c0.maxdval-c0.mindval)
+        # check AD2uV params of all ephys and aux chans:
+        for chantype, chanheaders in (('ephys', self.chanheaders),
+                                      ('aux', self.auxchanheaders)):
+            chans = {'ephys': self.chans, 'aux': self.auxchans}[chantype]
+            # all ephys should be in uV, all aux in mV:
+            units = {'ephys': 'uV', 'aux': 'mV'}[chantype]
+            try:
+                c0 = chanheaders[chans[0]] # ref channel for comparing AD2V params
+            except IndexError:
+                continue # no channels of this type (ephys or aux)
+            assert c0.units == units # assumed later during AD2V conversion
+            assert c0.maxaval == abs(c0.minaval) # not strictly necessary, but check anyway
+            assert c0.maxdval == abs(c0.mindval)
+            ref = c0.units, c0.maxaval, c0.minaval, c0.maxdval, c0.mindval
+            for c in chanheaders.values():
+                if (c.units, c.maxaval, c.minaval, c.maxdval, c.mindval) != ref:
+                    raise ValueError('not all chans have the same AD2V params')
+            # calculate AD2uV/AD2mV conversion factor:
+            if chantype == 'ephys':
+                self.AD2uVx = (c0.maxaval-c0.minaval) / float(c0.maxdval-c0.mindval)
+            else: # chantype == 'aux'
+                self.AD2mVx = (c0.maxaval-c0.minaval) / float(c0.maxdval-c0.mindval)
+
+
+    def parse_json(self, f):
+        """Parse potential .nsx.json file for probe name and optional adapter name"""
+        fname = os.path.realpath(f.name) # make sure we have the full fname with path
+        path = os.path.dirname(fname)
+        ext = os.path.splitext(fname)[1] # e.g., '.ns6'
+        # check if there is a file named exactly fname.json:
+        jsonfname = fname + '.json'
+        jsonbasefname = os.path.split(jsonfname)[-1]
+        print('Checking for metadata file %r' % jsonbasefname)
+        if os.path.exists(jsonfname):
+            print('Found metadata file %r' % jsonbasefname)
+        else:
+            jsonext = '%s.json' % ext # e.g. '.ns6.json'
+            print('No file named %r, checking for a single %s file of any name'
+                  % (jsonbasefname, jsonext))
+            jsonbasefnames = [ fname for fname in os.listdir(path) if fname.endswith(jsonext)
+                               and not fname.startswith('.') ]
+            njsonfiles = len(jsonbasefnames)
+            if njsonfiles == 1:
+                jsonbasefname = jsonbasefnames[0]
+                jsonfname = os.path.join(path, jsonbasefname) # full fname with path
+                print('Using metadata file %r' % jsonbasefname)
+            else:
+                jsonfname = None
+                print('Found %d %s files, ignoring them' % (njsonfiles, jsonext))
+
+        # get probe name and optional adapter name:
+        if jsonfname:
+            with open(jsonfname, 'r') as jf:
+                j = json.load(jf) # should return a dict of key:val pairs
+            assert type(j) == dict
+            # check field validity:
+            validkeys = ['chan_layout_name', # old name
+                         'probe_name', # new name
+                         'adapter_name']
+            keys = list(j)
+            for key in keys:
+                if key not in validkeys:
+                    raise ValueError("Found invalid field %r in %r\n"
+                                     "Fields currently allowed in .nsx.json files: %r"
+                                     % (key, jsonfname, validkeys))
+            try:
+                self.probename = j['probe_name'] # new name
+            except KeyError:
+                self.probename = j['chan_layout_name'] # old name
+            # make sure probename is valid probe.name or probe.layout,
+            # potentially rename any old probe names to new ones:
+            probe = probes.getprobe(self.probename)
+            self.probename = probe.name
+            self.adaptername = j.get('adapter_name')
+        else: # no .json file, maybe the .nsx comment specifies the probe type?
+            self.probename = self.comment.replace(' ', '_')
+            if self.probename != '':
+                print('Using %r in .nsx comment as probe name' % self.probename)
+            else:
+                self.probename = probes.DEFNSXPROBETYPE # A1x32
+                print('WARNING: assuming probe %s was used in this recording' % self.probename)
+            self.adaptername = None
+
+        # initialize probe and adapter:
+        self.set_probe()
+        self.set_adapter()
+        self.check_probe()
+        self.check_adapter()
+
+    def get_ephyschanlabels(self):
+        return np.asarray([ self.chanheaders[chan].label for chan in self.chans ])
+
+    ephyschanlabels = property(get_ephyschanlabels)
+
+    def get_auxchanlabels(self):
+        return np.asarray([ self.auxchanheaders[chan].label for chan in self.auxchans ])
+
+    auxchanlabels = property(get_auxchanlabels)
+
+    def get_alllabels(self):
+        return np.concatenate([self.ephyschanlabels, self.auxchanlabels])
+
+    alllabels = property(get_alllabels)
 
 
 class ChanHeader(object):
     """.nsx header information for a single channel"""
-
     def parse(self, f):
-        self.type = f.read(2)
+        self.type = f.read(2).decode()
         assert self.type == 'CC' # for "continuous channel"
-        self.id, = unpack('H', f.read(2)) # aka "electrode ID"
-        self.label = f.read(16).rstrip(NULL)
+        self.id, = unpack('H', f.read(2)) # AD channel, usually == probe channel if no adapter
+        self.label = f.read(16).rstrip(NULL).decode()
         self.connector, self.pin = unpack('BB', f.read(2)) # physical connector and pin
         # max and min digital and analog values:
         self.mindval, self.maxdval, self.minaval, self.maxaval = unpack('hhhh', f.read(8))
-        self.units = f.read(16).rstrip(NULL) # analog value units: "mV" or "uV"
+        self.units = f.read(16).rstrip(NULL).decode() # analog value units: "mV" or "uV"
         # high and low pass hardware filter settings? Blackrock docs are a bit vague:
         # corner freq (mHz); filt order (0=None); filter type (0=None, 1=Butterworth)
         self.hpcorner, self.hporder, self.hpfilttype = unpack("IIH", f.read(10))
