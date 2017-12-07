@@ -19,9 +19,9 @@ from . import __path__
 import os
 os.chdir(__path__[0])
 
-import sys
+import sys,tqdm
 import platform
-import time,tqdm
+import time
 import datetime
 import gc
 try:
@@ -3025,7 +3025,7 @@ class SpykeWindow(QtGui.QMainWindow):
         self.SPIKEWINDOWWIDTH = sort.probe.ncols * SPIKEWINDOWWIDTHPERCOLUMN
         self.updateTitle()
         self.updateRecentFiles(fullfname)
-        
+
         # set nids using apply_clustering():
         oldclusters = []
         sids = spikes['id']
@@ -3051,7 +3051,6 @@ class SpykeWindow(QtGui.QMainWindow):
         nreject = 0 # number spikes rejected during spatial localization
         print('Running spatial localization on all %d spikes' % nspikes)
         for s, wd in tqdm.tqdm(zip(sort.spikes, sort.wavedata),desc='Running spatial localization'):
-#        for s, wd in zip(sort.spikes, sort.wavedata):
             # Get Vpp at each inclchan's tis, use as spatial weights:
             # see core.rowtake() or util.rowtake_cy() for indexing explanation:
             sid = s['id']
@@ -3106,7 +3105,6 @@ class SpykeWindow(QtGui.QMainWindow):
             lockr = max(lockr, 1) # at least 1 um, so at least the maxchan gets a tick
             # test y coords of chans in y array, ylockchaniis can be used to index
             # into x, y and chans:
-            
             ylockchaniis, = np.where(np.abs(y - y0) <= lockr) # convert bool arr to int
             # test Euclid distance from x0, y0 for each ylockchani:
             lockchaniis = ylockchaniis.copy()
@@ -4045,5 +4043,5 @@ if __name__ == '__main__':
     QtCore.pyqtRemoveInputHook()
     app = QtGui.QApplication(sys.argv)
     spykewindow = SpykeWindow()
-    spykewindow.show()
-    sys.exit(app.exec_())
+#    spykewindow.show()
+#    sys.exit(app.exec_())

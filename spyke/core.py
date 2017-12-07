@@ -42,7 +42,7 @@ UNIXEPOCH = datetime.datetime(1970, 1, 1, 0, 0, 0) # UNIX epoch: Jan 1, 1970
 
 NULL = b'\x00'
 
-DEFDATFILTMETH = 'BW' # default .dat filter method: None, 'BW', 'WMLDR'
+DEFDATFILTMETH = None# default .dat filter method: None, 'BW', 'WMLDR'
 DEFNSXFILTMETH = 'BW' # default .nsx filter method: None, 'BW', 'WMLDR'
 BWHPF0 = 300 # butterworth high-pass filter low-frequency cutoff, Hz
 BWLPF1 = 300 # butterworth low-pass filter high-frequency cutoff, Hz
@@ -52,7 +52,7 @@ BWLPORDER = 4 # butterworth low-pass filter order
 # otherwise just decimate, which is simpler and faster, but aliases:
 LOWPASSFILTERLPSTREAM = True
 
-DEFCAR = 'Median' # default common average reference method: None, 'Median', 'Mean';
+DEFCAR = None # default common average reference method: None, 'Median', 'Mean';
                   # 'Median' works best because it's least affected by spikes
 
 DEFHPRESAMPLEX = 2 # default highpass resampling factor for all stream types
